@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# set shell to immediately exit if any command fails with status greater than zero
+set -e;
+
 ################################################### DECLARATIONS #######################################################
 
 JQ="/usr/bin/jq"
@@ -20,11 +23,6 @@ if ! command -v $WHMAPI1 &> /dev/null; then
   echo "$WHMAPI1 could not be found: Please verify it's installed and what is the path to it"
   exit
 fi
-
-#if ! command -v $UAPI &> /dev/null; then
-#    echo "$UAPI could not be found: Please verify it's installed and what is the path to it"
-#    exit
-#fi
 
 if ! command -v $CURL &> /dev/null; then
   echo "$CURL could not be found: Please verify it's installed and what is the path to it"
@@ -56,29 +54,14 @@ function nice_wait {
   done
 }
 
-function check_job_status () {
-  local JOB_ID=$1
-  echo "Checking status of Job ID: $JOB_ID"
-  while :; do
+function get_random_password {
+  LENGTH=$1
+  if [ -z "$LENGTH" ]; then
+    # If length not specified
+    LENGTH=16;
+  fi
 
-    local JOB_CHECK_QUERY=$($CURL --silent "https://api.sitehost.nz/1.1/job/get.json?apikey=$API_KEY&job_id=$JOB_ID&type=scheduler");
-    local QUERY_STATUS=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '.status');
-    if [ "$QUERY_STATUS" == "true" ]; then
-      local JOB_STATE=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '."return"."state"');
-      if [ $JOB_STATE == "Completed" ]; then
-        printf "\rJob ID $JOB_ID completed! \n"
-        return
-      else
-        printf "\r checking ... ---"
-        nice_wait
-      fi
-
-    else
-      local QUERY_MSG=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '."msg"');
-      error_exit "$LINENO: Failed checking status of Job ID: $JOB_ID. Message: $QUERY_MSG";
-    fi
-
-  done
+  echo "$(< /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c $LENGTH)";
 }
 
 ################################################## START UP LOGIC ######################################################
@@ -120,25 +103,6 @@ while [ "$1" != "" ]; do
 done
 
 ################################################## BASE FUNCTIONS ######################################################
-function migrate_user () {
-  CPANEL_USER=$1
-
-  if [ "$CPANEL_USER" == "root" ]; then
-    error_exit "$LINENO: Cannot migrate root user"
-  fi
-
-  echo "Server name: $SERVER_NAME"
-  echo "Server IP: $SERVER_IP"
-  echo "--- $CPANEL_USER ---";
-
-  cpanel_user_info_gathering
-  STACK_NAME=$(get_random_name)
-  #echo $STACK_NAME;
-  IMAGE_CODE="sitehost-php$PHP_VERSION-apache";
-  IMAGE_VERSION=$(get_last_image_version $IMAGE_CODE);
-  DOCKERFILE=$(build_dockerfile $STACK_NAME $DOMAIN $IMAGE_CODE $IMAGE_VERSION)
-  echo $DOCKERFILE
-}
 
 function migrate_domain () {
   local CPANEL_DOMAIN_DATA=$1
@@ -164,6 +128,8 @@ function migrate_domain () {
 
   create_container_for_domain
 
+  cpanel_create_databases
+
   echo '---';
 }
 
@@ -171,7 +137,7 @@ function create_container_for_domain {
 
   read -p "Would you like to create a Container for \"$DOMAIN\" [y/N]: " RESPONSE;
   case "$RESPONSE" in
-    [yY][eE][sS]|[yY])
+    [yY][eE][sS]|[yY] )
         echo "Yes, creating Container on $SERVER_NAME with IP $SERVER_IP";
         local CREATE_CONTAINER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server=$SERVER_NAME&name=$STACK_NAME&label=$DOMAIN&enable_ssl=0&docker_compose=$DOCKERFILE" --request POST --silent "https://api.sitehost.nz/1.1/cloud/stack/add.json");
         local QUERY_STATUS=$(echo $CREATE_CONTAINER_QUERY | $JQ --raw-output '.status');
@@ -184,7 +150,7 @@ function create_container_for_domain {
           error_exit "$LINENO: Failed creating a Container for \"$DOMAIN\". Message: $QUERY_MSG";
         fi
         ;;
-    *)
+    * )
         echo "No, won't create a Container";
         ;;
   esac
@@ -194,7 +160,7 @@ function cpanel_get_userdata () {
   local CPANEL_DOMAIN=$1
   local CPANEL_USER_DATA=$($WHMAPI1 --output=json domainuserdata domain=$CPANEL_DOMAIN);
   local CPANEL_SERVERALIAS=$(echo $CPANEL_USER_DATA | $JQ --raw-output '."data"."userdata"."serveralias"');
-  local CPANEL_DOCUMENTROOT=$(echo $CPANEL_USER_DATA | $JQ --raw-output '."data"."userdata"."documentroot"');
+  CPANEL_DOCUMENTROOT=$(echo $CPANEL_USER_DATA | $JQ --raw-output '."data"."userdata"."documentroot"');
 
   ALIAS_LIST="";
   for ALIAS in $CPANEL_SERVERALIAS; do
@@ -207,34 +173,76 @@ function cpanel_get_userdata () {
   ALIAS_LIST="${ALIAS_LIST%?}"
 }
 
-function cpanel_user_info_gathering () {
-  DOMAIN=$($UAPI --user=$CPANEL_USER DomainInfo list_domains --output=json | $JQ --raw-output  '.result.data.main_domain');
-  echo "main_domain for $CPANEL_USER: $DOMAIN";
-
-  local CPANEL_PARKED_DOMAINS=$($UAPI --user=$CPANEL_USER DomainInfo list_domains --output=json | $JQ --raw-output '.result.data.parked_domains');
-  local PARKED_DOMAINS_COUNT=$(( $(echo $CPANEL_PARKED_DOMAINS | $JQ --raw-output 'length') - 1));
-  ALIAS_LIST="";
-  for (( i=0; i<=$PARKED_DOMAINS_COUNT; i++ )); do
-    local ALIAS=$(echo $CPANEL_PARKED_DOMAINS | $JQ --raw-output ".[$i]");
-    if [ $i -eq $PARKED_DOMAINS_COUNT ]; then
-      # Last alias, do not add ,
-      ALIAS_LIST="${ALIAS_LIST}${ALIAS}";
-    else
-      ALIAS_LIST="${ALIAS_LIST}${ALIAS},";
-    fi
-  done
-  echo "parked_domains for $CPANEL_USER: $ALIAS_LIST";
-
-  local CPANEL_PHP_VERSION=$($WHMAPI1 get_domain_info --output=json api.columns.enable=1 api.columns.a=user api.columns.b=php_version | $JQ --raw-output ".data.domains[] | select(.user==\"$CPANEL_USER\")" | $JQ --raw-output '.php_version');
-  echo $CPANEL_PHP_VERSION;
-  PHP_VERSION="${CPANEL_PHP_VERSION//[!1-9]/}" # Note: we do not want 0s here. SiteHost standard
-  echo "php_version for $CPANEL_USER: $PHP_VERSION";
-
-  local DB_INFO=$($WHMAPI1 list_mysql_databases_and_users --output=json  user=$CPANEL_USER);
-  #TODO: possible point of failure. Check what are the results when cPanel server has MariaDB installed
+function cpanel_create_databases {
+  DB_INFO=$($WHMAPI1 list_mysql_databases_and_users --output=json  user=$CPANEL_USER);
+  #echo "DB INFO: $DB_INFO";
+  #TODO: Investigate possible point of failure. Check what are the results when cPanel server has MariaDB installed
   local CPANEL_MYSQL_VERSION=$(echo $DB_INFO | $JQ --raw-output ".data.mysql_config.\"mysql-version\"");
   MYSQL_VERSION="${CPANEL_MYSQL_VERSION//[!0-9]/}"
   echo "mysql_version for $CPANEL_USER: $MYSQL_VERSION";
+
+  CPANEL_DATABASES_ARRAY=$(echo $DB_INFO | $JQ --raw-output '.data."mysql_databases" | keys');
+  local NUMBER_OF_DATABASES=$(echo $CPANEL_DATABASES_ARRAY | $JQ --raw-output 'length');
+  if [ "$NUMBER_OF_DATABASES" -gt "0" ]; then
+    create_databases
+  else
+    echo "No databases found for user: $CPANEL_USER"
+  fi
+}
+
+function create_databases {
+  local CPANEL_DATABASES=$(echo $CPANEL_DATABASES_ARRAY | $JQ --raw-output '.[]');
+  for CPANEL_DATABASE in $CPANEL_DATABASES; do
+    read -p "Would you like to create a database to replace \"$CPANEL_DATABASE\" on the server? [y/N]: " RESPONSE;
+    case "$RESPONSE" in
+      [yY][eE][sS]|[yY] )
+          MYSQLHOST="mysql$MYSQL_VERSION";
+          CONTAINER_DB_NAME=${CPANEL_DATABASE//_/}; # Underscore on DB name not supported
+          local DB_CREATE_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&mysql_host=$MYSQLHOST&database=$CONTAINER_DB_NAME&container=$STACK_NAME" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/add.json");
+          local QUERY_STATUS=$(echo $DB_CREATE_QUERY | $JQ --raw-output '.status');
+          if [ "$QUERY_STATUS" == "true" ]; then
+            local QUERY_JOB_ID=$(echo $DB_CREATE_QUERY | $JQ --raw-output '."return"."job_id"');
+            echo "Trying to create database name \"$CONTAINER_DB_NAME\"";
+            check_job_status $QUERY_JOB_ID;
+            create_database_users $CPANEL_DATABASE;
+          else
+            local QUERY_MSG=$(echo $DB_CREATE_QUERY | $JQ --raw-output '."msg"');
+            error_exit "$LINENO: Failed creating database: $CONTAINER_DB_NAME. Message: $QUERY_MSG";
+          fi
+          ;;
+      * )
+          echo "Ok, won't create a replacement for $CPANEL_DATABASE";
+          ;;
+    esac
+  done
+}
+
+function create_database_users {
+  local $CPANEL_DATABASE=$1
+  local CPANEL_DATABASE_USERS=$(echo $DB_INFO | $JQ --raw-output ".\"data\".\"mysql_databases\".\"$CPANEL_DATABASE\"[]");
+  for CPANEL_DATABASE_USER in $CPANEL_DATABASE_USERS; do
+    read -p "Would you like to create a database user to replace \"$CPANEL_DATABASE_USER\" on the server? [y/N]: " RESPONSE;
+    case "$RESPONSE" in
+      [yY][eE][sS]|[yY] )
+          local CONTAINER_DB_USER=${CPANEL_DATABASE_USER//_/}; # Underscore on DB users not supported
+          local CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16
+          # TODO: Check the data here, get user grants from cPanel
+          local DB_USER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&mysql_host=$MYSQLHOST&username=$CONTAINER_DB_USER&password=$CONTAINER_DB_USER_PWD&database=$CONTAINER_DB_NAME&grants[]=select&grants[]=insert&grants[]=update&grants[]=delete&grants[]=create&grants[]=drop&grants[]=alter&grants[]=index&grants[]=create view&grants[]=show view&grants[]=lock tables&grants[]=create temporary tables" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
+          local QUERY_STATUS=$(echo $DB_USER_QUERY | $JQ --raw-output '.status');
+          if [ "$QUERY_STATUS" == "true" ]; then
+            local QUERY_JOB_ID=$(echo $DB_USER_QUERY | $JQ --raw-output '."return"."job_id"');
+            echo "Trying to create database user \"$CPANEL_DATABASE_USER\" with password \"$CONTAINER_DB_USER_PWD\"";
+            check_job_status $QUERY_JOB_ID;
+          else
+            local QUERY_MSG=$(echo $DB_USER_QUERY | $JQ --raw-output '."msg"');
+            error_exit "$LINENO: Failed creating database user: $CPANEL_DATABASE_USER. Message: $QUERY_MSG";
+          fi
+          ;;
+      * )
+          echo "Ok, won't create a replacement database user for $CPANEL_DATABASE_USER";
+          ;;
+    esac
+  done
 }
 
 function build_dockerfile () {
@@ -299,37 +307,81 @@ function get_last_image_version (){
   fi
 }
 
+function check_job_status () {
+  local JOB_ID=$1
+  echo "Checking status of Job ID: $JOB_ID"
+  while :; do
+
+    local JOB_CHECK_QUERY=$($CURL --silent "https://api.sitehost.nz/1.1/job/get.json?apikey=$API_KEY&job_id=$JOB_ID&type=scheduler");
+    local QUERY_STATUS=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '.status');
+    if [ "$QUERY_STATUS" == "true" ]; then
+      local JOB_STATE=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '."return"."state"');
+      if [ $JOB_STATE == "Completed" ]; then
+        printf "\rJob ID $JOB_ID completed! \n"
+        return
+      else
+        printf "\r checking ... ---"
+        nice_wait
+      fi
+
+    else
+      local QUERY_MSG=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '."msg"');
+      error_exit "$LINENO: Failed checking status of Job ID: $JOB_ID. Message: $QUERY_MSG";
+    fi
+
+  done
+}
+
 function pick_destination_server {
   local SERVERS_QUERY=$($CURL --silent "https://api.sitehost.nz/1.1/server/list_all.json?apikey=$API_KEY&client_id=$CLIENT_ID");
   local QUERY_STATUS=$(echo $SERVERS_QUERY | $JQ --raw-output '.status');
   if [ "$QUERY_STATUS" == "true" ]; then
     local SERVERS_COUNT=$(( $(echo $SERVERS_QUERY | $JQ --raw-output '.return."total_items"') - 1));
-    ## TODO: Error handling, when there's no Cloud Containers on the account
-    echo -e "\nChoose a destionation server from the list:"
-    for (( i=0; i<=$SERVERS_COUNT; i++ )); do
-      local SRV_NAME=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$i].\"name\"");
-      local SRV_LABEL=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$i].\"label\"");
-      local SRV_IPS=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$i].\"primary_ips\"[]");
-      local SRV_IP4=$(echo $SRV_IPS | $JQ --raw-output "select(.prefix==\"32\").ip_addr");
-      echo "$i: Label=$SRV_LABEL, IPv4=$SRV_IP4";
-    done
+    case $SERVERS_COUNT in
+      -1 )
+        # No Cloud Container server on the account
+        error_exit "$LINENO: Cannot find a Cloud Container server on the account ID $CLIENT_ID"
+        ;;
 
-    while :; do
-      read -p "Enter the server ID: " SRV_ID;
-      [[ $SRV_ID =~ ^[0-9]+$ ]] || { echo -e "Error: \tInvalid ID, try again \n"; continue; }
-      if (($SRV_ID < 0 || $SRV_ID > $SERVERS_COUNT)); then
-        echo -e "Error: \tInvalid ID, try again \n";
-      else
-        SERVER_NAME=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$SRV_ID].\"name\"");
-        SRV_IPS=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$SRV_ID].\"primary_ips\"[]");
-        SERVER_IP=$(echo $SRV_IPS | $JQ --raw-output "select(.prefix==\"32\").ip_addr");
-        break
-      fi
-    done
+      0 )
+        # Auto select the server if there's just one available
+        SERVER_NAME=$(echo $SERVERS_QUERY | $JQ --raw-output '.return."data"[0]."name"');
+        SRV_IPS=$(echo $SERVERS_QUERY | $JQ --raw-output '.return."data"[0]."primary_ips"[]');
+        SERVER_IP=$(echo $SRV_IPS | $JQ --raw-output 'select(.prefix=="32").ip_addr');
+        echo "Only one server found on the account, auto selecting it.";
+        ;;
+
+      * )
+        # Multiple Cloud Container servers on the account. Select one
+        echo -e "\nChoose a destionation server from the list:"
+        for (( i=0; i<=$SERVERS_COUNT; i++ )); do
+          local SRV_NAME=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$i].\"name\"");
+          local SRV_LABEL=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$i].\"label\"");
+          local SRV_IPS=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$i].\"primary_ips\"[]");
+          local SRV_IP4=$(echo $SRV_IPS | $JQ --raw-output 'select(.prefix=="32").ip_addr');
+          echo "$i: Label=$SRV_LABEL, IPv4=$SRV_IP4";
+        done
+
+        while :; do
+          read -p "Enter the server ID: " SRV_ID;
+          [[ $SRV_ID =~ ^[0-9]+$ ]] || { echo -e "Error: \tInvalid ID, try again \n"; continue; }
+          if (($SRV_ID < 0 || $SRV_ID > $SERVERS_COUNT)); then
+            echo -e "Error: \tInvalid ID, try again \n";
+          else
+            SERVER_NAME=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$SRV_ID].\"name\"");
+            SRV_IPS=$(echo $SERVERS_QUERY | $JQ --raw-output ".return.\"data\"[$SRV_ID].\"primary_ips\"[]");
+            SERVER_IP=$(echo $SRV_IPS | $JQ --raw-output 'select(.prefix=="32").ip_addr');
+            break
+          fi
+        done
+        ;;
+    esac
 
   else
     error_exit "$LINENO: Cannot list Cloud Container servers on the account $CLIENT_ID"
   fi
+
+  echo "Working with server name: $SERVER_NAME on IPv4: $SERVER_IP";
 }
 
 #################################################### BASE LOGIC ########################################################
@@ -356,7 +408,7 @@ if [ -z "$MAIN_DOMAIN" ]; then
       migrate_domain "$CPANEL_DOMAIN_INFO";
     fi
 
-    sleep 3
+    #sleep 1
   done
 
 else
