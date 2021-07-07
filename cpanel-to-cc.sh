@@ -1,41 +1,46 @@
 #!/bin/bash
 
 # set shell to immediately exit if any command fails with status greater than zero
+# TODO: consider pro and cons of using this
 set -e;
 
 ################################################### DECLARATIONS #######################################################
 
 JQ="/usr/bin/jq"
 WHMAPI1="/usr/sbin/whmapi1"
-UAPI="/usr/bin/uapi"
+RSYNC="/usr/bin/rsync"
 CURL="/usr/bin/curl"
-TEMP_DIR="/tmp/cpanel_to_cc"
+MYSQLDUMP="/usr/bin/mysqldump"
+MYSQL="/usr/bin/mysql"
+SSHPASS="/usr/bin/sshpass"
+SSH="/usr/bin/ssh"
+TMP_DIR="/tmp/cpanel_to_cc"
+
+# If the API key is not specified, we search for a file named api.key on the current run path
 API_KEY=$(cat $(pwd)/api.key 2>/dev/null)
 
 ################################################ REQUIREMENTS CHECK ####################################################
 
-if ! command -v $JQ &> /dev/null; then
-    echo "$JQ could not be found: Please verify it's installed and what is the path to it"
-    exit
-fi
+function check_software () {
+  while [ "$1" != "" ]; do
+    if ! command -v $1 &> /dev/null; then
+      error_exit "$1 could not be found: Please verify it's installed and what is the full path to it";
+    fi
+    # Next parameter passed
+    shift
+  done
+}
 
-if ! command -v $WHMAPI1 &> /dev/null; then
-  echo "$WHMAPI1 could not be found: Please verify it's installed and what is the path to it"
-  exit
-fi
-
-if ! command -v $CURL &> /dev/null; then
-  echo "$CURL could not be found: Please verify it's installed and what is the path to it"
-  exit
-fi
+check_software $JQ $WHMAPI1 $RSYNC $CURL $MYSQLDUMP $MYSQL $SSHPASS $SSH
 
 ################################################# HELPER FUNCTIONS #####################################################
 
 function help_text {
-	echo -e "This is how you use this:\n"
-	echo -e "\t-c, --client-id \n\t\t Your SiteHost Client ID \n"
-	echo -e "\t-k, --api-key \n\t\t Your SiteHost API key \n"
+  echo -e "This is how you use this:\n"
+  echo -e "\t-c, --client-id \n\t\t Your SiteHost Client ID \n"
+  echo -e "\t-k, --api-key \n\t\t Your SiteHost API key \n"
   echo -e "\t-d, --domain \n\t\t (Optional) The cPanel domain to migrate. If not specified we try migrate all \n"
+  echo -e "\t-t, --tmp-dir \n\t\t (Optional) Directory to store temporary files and logs \n"
 }
 
 function error_exit {
@@ -54,7 +59,7 @@ function nice_wait {
   done
 }
 
-function get_random_password {
+function get_random_password () {
   LENGTH=$1
   if [ -z "$LENGTH" ]; then
     # If length not specified
@@ -72,28 +77,31 @@ function get_random_password {
 # Argument Loop
 while [ "$1" != "" ]; do
   case $1 in
-    # USAGE!!!!
     "-h" | "--help" )
     	help_text
     	exit 0
     ;;
 
-    # Client ID
     "-c" | "--client-id" )
     	shift
     	CLIENT_ID=$1
     ;;
 
-    # API key
     "-k" | "--api-key" )
     	shift
     	API_KEY=$1
     ;;
 
-    # cPanel user to migrate
+    # cPanel domain to migrate
     "-d" | "--domain" )
       shift
       MAIN_DOMAIN=$1
+    ;;
+
+    # Path to directory we store temporary files and logs
+    "-t" | "--tmp-dir" )
+      shift
+      TMP_DIR=$1
     ;;
 
 	esac
@@ -129,6 +137,10 @@ function migrate_domain () {
   create_container_for_domain
 
   cpanel_create_databases
+
+  create_ssh_user_for_container
+
+  copy_website_files
 
   echo '---';
 }
@@ -384,6 +396,44 @@ function pick_destination_server {
   echo "Working with server name: $SERVER_NAME on IPv4: $SERVER_IP";
 }
 
+function create_ssh_user_for_container {
+  read -p "Would you like to create an SFTP/SSH user to access the \"$DOMAIN\" Container? [y/N]: " RESPONSE;
+  case "$RESPONSE" in
+    [yY][eE][sS]|[yY] )
+        SSH_USERNAME=$(echo ${DOMAIN//./} | head -c 16); # Remove . chars from Domain and limit length to 16 characters
+        SSH_PASSWORD=$(get_random_password 20); # 20 characters should be enough
+        echo "Trying to create an SFTP/SSH user with name \"$SSH_USERNAME\" and password \"$SSH_PASSWORD\" on stack $STACK_NAME";
+        local SFTP_USER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&username=$SSH_USERNAME&password=$SSH_PASSWORD&containers[]=$STACK_NAME" --request POST --silent "https://api.sitehost.nz/1.1/cloud/ssh/user/add.json");
+        local QUERY_STATUS=$(echo $SFTP_USER_QUERY | $JQ --raw-output '.status');
+        if [ "$QUERY_STATUS" == "true" ]; then
+          local QUERY_JOB_ID=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."return"."job_id"');
+          check_job_status $QUERY_JOB_ID;
+        else
+          local QUERY_MSG=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."msg"');
+          error_exit "$LINENO: Cannot create SFTP/SSH user $SSH_USERNAME. Message: $QUERY_MSG"
+        fi
+        ;;
+    * )
+        echo "Ok, won't create an SFTP/SSH user to access $DOMAIN";
+        ;;
+  esac
+}
+
+function copy_website_files {
+  # TODO: This depends on SSH credentials we only have if we created SFTP user on the runtime. Maybe do error handling or implement alternative methods.
+  read -p "Would you like copy website files to the \"$DOMAIN\" Container? [y/N]: " RESPONSE;
+  case "$RESPONSE" in
+    [yY][eE][sS]|[yY] )
+        echo "Trying to copy files from \"$CPANEL_DOCUMENTROOT\" to the Container's public directory";
+        $RSYNC --rsh="$SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete ${CPANEL_DOCUMENTROOT}/ ${SSH_USERNAME}@${SERVER_IP}:/container/application/public/
+        # TODO: Consider if we want to show stats allowing it to throw data into stdout
+        # TODO: Maybe do some error handling and 2>/dev/null ?
+        ;;
+    * )
+        echo "Ok, won't copy \"$DOMAIN\" website files";
+        ;;
+  esac
+}
 #################################################### BASE LOGIC ########################################################
 
 pick_destination_server
