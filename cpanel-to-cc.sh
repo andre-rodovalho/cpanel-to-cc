@@ -14,6 +14,7 @@ MYSQLDUMP="/usr/bin/mysqldump"
 MYSQL="/usr/bin/mysql"
 SSHPASS="/usr/bin/sshpass"
 SSH="/usr/bin/ssh"
+GZIP="/usr/bin/gzip"
 TMP_DIR="/tmp/cpanel_to_cc"
 
 # If the API key is not specified, we search for a file named api.key on the current run path
@@ -31,7 +32,7 @@ function check_software () {
   done
 }
 
-check_software $JQ $WHMAPI1 $RSYNC $CURL $MYSQLDUMP $MYSQL $SSHPASS $SSH
+check_software $JQ $WHMAPI1 $RSYNC $CURL $MYSQLDUMP $MYSQL $SSHPASS $SSH $GZIP
 
 ################################################# HELPER FUNCTIONS #####################################################
 
@@ -50,6 +51,10 @@ function error_exit {
 
 function timestamp {
   date +"%F %T"
+}
+
+function fulldate {
+  date +"%F"
 }
 
 function nice_wait {
@@ -136,11 +141,11 @@ function migrate_domain () {
 
   create_container_for_domain
 
-  cpanel_create_databases
-
   create_ssh_user_for_container
 
   copy_website_files
+
+  cpanel_create_databases
 
   echo '---';
 }
@@ -230,14 +235,14 @@ function create_databases {
 }
 
 function create_database_users {
-  local $CPANEL_DATABASE=$1
+  local CPANEL_DATABASE=$1
   local CPANEL_DATABASE_USERS=$(echo $DB_INFO | $JQ --raw-output ".\"data\".\"mysql_databases\".\"$CPANEL_DATABASE\"[]");
   for CPANEL_DATABASE_USER in $CPANEL_DATABASE_USERS; do
     read -p "Would you like to create a database user to replace \"$CPANEL_DATABASE_USER\" on the server? [y/N]: " RESPONSE;
     case "$RESPONSE" in
       [yY][eE][sS]|[yY] )
-          local CONTAINER_DB_USER=${CPANEL_DATABASE_USER//_/}; # Underscore on DB users not supported
-          local CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16
+          CONTAINER_DB_USER=${CPANEL_DATABASE_USER//_/}; # Underscore on DB users not supported
+          CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16
           # TODO: Check the data here, get user grants from cPanel
           local DB_USER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&mysql_host=$MYSQLHOST&username=$CONTAINER_DB_USER&password=$CONTAINER_DB_USER_PWD&database=$CONTAINER_DB_NAME&grants[]=select&grants[]=insert&grants[]=update&grants[]=delete&grants[]=create&grants[]=drop&grants[]=alter&grants[]=index&grants[]=create view&grants[]=show view&grants[]=lock tables&grants[]=create temporary tables" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
           local QUERY_STATUS=$(echo $DB_USER_QUERY | $JQ --raw-output '.status');
@@ -245,6 +250,7 @@ function create_database_users {
             local QUERY_JOB_ID=$(echo $DB_USER_QUERY | $JQ --raw-output '."return"."job_id"');
             echo "Trying to create database user \"$CPANEL_DATABASE_USER\" with password \"$CONTAINER_DB_USER_PWD\"";
             check_job_status $QUERY_JOB_ID;
+            copy_database_dump $CPANEL_DATABASE;
           else
             local QUERY_MSG=$(echo $DB_USER_QUERY | $JQ --raw-output '."msg"');
             error_exit "$LINENO: Failed creating database user: $CPANEL_DATABASE_USER. Message: $QUERY_MSG";
@@ -255,6 +261,46 @@ function create_database_users {
           ;;
     esac
   done
+}
+
+
+function copy_database_dump {
+  local CPANEL_DATABASE=$1
+  # TODO: This depends on SSH credentials we only have if we created SFTP user on the runtime. Maybe do error handling or implement alternative methods.
+  read -p "Would you like to backup the database \"$CPANEL_DATABASE\" and restore it on the Container? [y/N]: " RESPONSE;
+  case "$RESPONSE" in
+    [yY][eE][sS]|[yY] )
+        mkdir --parents $TMP_DIR; # no error if existing, make parent directories as needed
+        local DATABASE_DUMP_FILENAME=$(echo ${CPANEL_DATABASE}_$(fulldate).sql.gz)
+        local DATABASE_DUMP_PATH=$(echo ${TMP_DIR}/${DATABASE_DUMP_FILENAME});
+        echo "Trying to create dump at \"$DATABASE_DUMP_PATH\"";
+        $MYSQLDUMP $CPANEL_DATABASE | $GZIP > $DATABASE_DUMP_PATH;
+        echo "Trying to copy dump to the Container's application directory";
+        $RSYNC --rsh="$SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete $DATABASE_DUMP_PATH ${SSH_USERNAME}@${SERVER_IP}:/container/application/
+        # TODO: Error handling
+        echo "Removing dump at \"$DATABASE_DUMP_PATH\"";
+        rm --force $DATABASE_DUMP_PATH;
+        restore_database_from_dump $DATABASE_DUMP_FILENAME;
+        ;;
+    * )
+        echo "Ok, won't store a database backup of \"$CPANEL_DATABASE\" on the Container";
+        ;;
+  esac
+
+}
+
+function restore_database_from_dump () {
+  local DATABASE_DUMP_FILENAME=$1
+  read -p "Would you like to restore the \"$CONTAINER_DB_NAME\" on the Container? [y/N]: " RESPONSE;
+  case "$RESPONSE" in
+    [yY][eE][sS]|[yY] )
+        $SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no ${SSH_USERNAME}@${SERVER_IP} "gunzip < /container/application/$DATABASE_DUMP_FILENAME | mysql --host=$MYSQLHOST --user=${CONTAINER_DB_USER} --password=${CONTAINER_DB_USER_PWD} $CONTAINER_DB_NAME"
+        # TODO: Error handling, check for CONTAINER_DB_USER_PWD and CONTAINER_DB_USER
+        ;;
+    * )
+        echo "Ok, won't try to restore the \"$CONTAINER_DB_NAME\" from the dump file";
+        ;;
+  esac
 }
 
 function build_dockerfile () {
@@ -421,7 +467,7 @@ function create_ssh_user_for_container {
 
 function copy_website_files {
   # TODO: This depends on SSH credentials we only have if we created SFTP user on the runtime. Maybe do error handling or implement alternative methods.
-  read -p "Would you like copy website files to the \"$DOMAIN\" Container? [y/N]: " RESPONSE;
+  read -p "Would you like to copy website files to the \"$DOMAIN\" Container? [y/N]: " RESPONSE;
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
         echo "Trying to copy files from \"$CPANEL_DOCUMENTROOT\" to the Container's public directory";
@@ -434,6 +480,7 @@ function copy_website_files {
         ;;
   esac
 }
+
 #################################################### BASE LOGIC ########################################################
 
 pick_destination_server
