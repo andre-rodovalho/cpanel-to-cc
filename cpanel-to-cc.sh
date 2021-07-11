@@ -1,5 +1,32 @@
 #!/bin/bash
 
+# cPanel to SiteHost Containers Migration Tool - https://gitlab.com/andre.rodovalho/cpanel-to-cc
+# Copyright (C) 2021-present Andre Campos Rodovalho.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# cPanel® is a trademark of cPanel, Inc.
+# SiteHost Limited is a legal entity name owned by SiteTech Solutions Limited
+#
+# All trademarks, logos and brand names are the property of their respective owners.
+# All company, product and service names used in this software are for
+# identification purposes only. Use of these names, trademarks and brands
+# does not imply endorsement.
+
+
+################################################### CONFIGURATION ######################################################
+
 # set shell to immediately exit if any command fails with status greater than zero
 # TODO: consider pro and cons of using this
 set -e;
@@ -15,33 +42,24 @@ MYSQL="/usr/bin/mysql"
 SSHPASS="/usr/bin/sshpass"
 SSH="/usr/bin/ssh"
 GZIP="/usr/bin/gzip"
-TMP_DIR="/tmp/cpanel_to_cc"
-
-# If the API key is not specified, we search for a file named api.key on the current run path
-API_KEY=$(cat $(pwd)/api.key 2>/dev/null)
-
-################################################ REQUIREMENTS CHECK ####################################################
-
-function check_software () {
-  while [ "$1" != "" ]; do
-    if ! command -v $1 &> /dev/null; then
-      error_exit "$1 could not be found: Please verify it's installed and what is the full path to it";
-    fi
-    # Next parameter passed
-    shift
-  done
-}
-
-check_software $JQ $WHMAPI1 $RSYNC $CURL $MYSQLDUMP $MYSQL $SSHPASS $SSH $GZIP
+TMP_DIR="/tmp/cpanel-to-cc"
 
 ################################################# HELPER FUNCTIONS #####################################################
 
 function help_text {
-  echo -e "This is how you use this:\n"
-  echo -e "\t-c, --client-id \n\t\t Your SiteHost Client ID \n"
-  echo -e "\t-k, --api-key \n\t\t Your SiteHost API key \n"
-  echo -e "\t-d, --domain \n\t\t (Optional) The cPanel domain to migrate. If not specified we try migrate all \n"
-  echo -e "\t-t, --tmp-dir \n\t\t (Optional) Directory to store temporary files and logs \n"
+  echo;
+  echo -e "Usage: ./cpanel-to-cc.sh [arguments] ..."
+  echo -e "Examples: "
+  echo -e "\t ./cpanel-to-cc.sh --client-id 123123 --api-key abc123def456 --domain example.com"
+  echo -e "\t ./cpanel-to-cc.sh --client-id 123123 --tmp-dir /home/user/cpanel-to-cc"
+  echo;
+  echo -e "Arguments: \n"
+  echo -e "Option \t\t\t Long option \t\t\t Function"
+  echo -e " -c <id> \t\t --client-id <id> \t\t Specify the SiteHost Client ID"
+  echo -e " -k <key> \t\t --api-key <key> \t\t Specify the SiteHost API key with access to Cloud, Job and Server modules"
+  echo -e " -d <domain> \t\t --domain <domain> \t\t (Optional) The cPanel domain to migrate. If not specified we try migrate all"
+  echo -e " -t <directory> \t --tmp-dir <directory> \t\t (Optional) Directory to store temporary files and logs. Default is: $TMP_DIR"
+  echo;
 }
 
 function error_exit {
@@ -72,6 +90,18 @@ function get_random_password () {
   fi
 
   echo "$(< /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c $LENGTH)";
+}
+
+################################################ REQUIREMENTS CHECK ####################################################
+
+function check_software () {
+  while [ "$1" != "" ]; do
+    if ! command -v $1 &> /dev/null; then
+      error_exit "$1 could not be found: Please verify it's installed and what is the full path to it";
+    fi
+    # Next parameter passed
+    shift
+  done
 }
 
 ################################################## START UP LOGIC ######################################################
@@ -151,7 +181,6 @@ function migrate_domain () {
 }
 
 function create_container_for_domain {
-
   read -p "Would you like to create a Container for \"$DOMAIN\" [y/N]: " RESPONSE;
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
@@ -436,7 +465,8 @@ function pick_destination_server {
     esac
 
   else
-    error_exit "$LINENO: Cannot list Cloud Container servers on the account $CLIENT_ID"
+    local QUERY_MSG=$(echo $SERVERS_QUERY | $JQ --raw-output '."msg"');
+    error_exit "$LINENO: Cannot list Cloud Container servers on the account $CLIENT_ID. Message: $QUERY_MSG"
   fi
 
   echo "Working with server name: $SERVER_NAME on IPv4: $SERVER_IP";
@@ -481,7 +511,24 @@ function copy_website_files {
   esac
 }
 
+function get_api_key {
+  if [ -z "$API_KEY" ]; then
+    local API_FILE="$(pwd)/api.key";
+    if [ -f "$API_FILE" ]; then
+      # If the API key is not specified, we search for a file named api.key on the current run path
+      echo "API key file found at $API_FILE, loading it";
+      API_KEY=$(cat $API_FILE)
+    else
+      error_exit "$LINENO: API key not found, please specify";
+    fi
+  fi
+}
+
 #################################################### BASE LOGIC ########################################################
+
+check_software $JQ $WHMAPI1 $RSYNC $CURL $MYSQLDUMP $MYSQL $SSHPASS $SSH $GZIP
+
+get_api_key
 
 pick_destination_server
 
