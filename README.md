@@ -15,6 +15,12 @@ This bash script leverages the [SiteHost API](https://docs.sitehost.nz/api/v1.1/
 - There's no metadata to correlate databases and domains on the Source server but you can interact with the tool to selectively copy data over
 - SiteHost API key with access to Cloud, Job and Server modules is required. SiteHost support can provide you with one
 
+You may need to install a few extra packages on the Source server:
+
+```
+yum install jq rsync curl sshpass
+```
+
 # Usage
 
 Copy the `cpanel-to-cc.sh` script to the Source server. You can make it executable and run or invoke bash:
