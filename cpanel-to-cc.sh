@@ -196,9 +196,8 @@ function migrate_domain () {
   CPANEL_USER=$(echo $CPANEL_DOMAIN_DATA | $JQ --raw-output '."user"');
   print_or_log "cpanel user: $CPANEL_USER";
 
-  local CPANEL_PHP_VERSION=$(echo $CPANEL_DOMAIN_DATA | $JQ --raw-output '."php_version"');
-  PHP_VERSION="${CPANEL_PHP_VERSION//[!1-9]/}" # Note: we do not want 0s here. SiteHost convention
-  print_or_log "php_version for $DOMAIN: $PHP_VERSION";
+  CPANEL_PHP_VERSION=$(echo $CPANEL_DOMAIN_DATA | $JQ --raw-output '."php_version"');
+  set_php_version
 
   cpanel_get_userdata $DOMAIN;
   VHOSTS="${DOMAIN},${ALIAS_LIST}";
@@ -218,6 +217,19 @@ function migrate_domain () {
   cpanel_create_databases
 
   print_or_log "--- Done ---"
+}
+
+function set_php_version {
+  if [ -z "$CPANEL_PHP_VERSION" ]; then
+    # php_version is blank, this happens when the cPanel account or domain is set with the "Inherit" option
+    # Get php_version default on the system
+    local PHP_DEFAULT_VERSION=$($WHMAPI1 --output=json php_get_system_default_version | $JQ --raw-output '."data"."version"');
+    PHP_VERSION="${PHP_DEFAULT_VERSION//[!1-9]/}" # Note: we do not want 0s here. SiteHost convention
+    print_or_log "cPanel php_version is blank, (Inherit selected?). System default set: $PHP_VERSION";
+  else
+    PHP_VERSION="${CPANEL_PHP_VERSION//[!1-9]/}" # Note: we do not want 0s here. SiteHost convention
+    print_or_log "php_version for $DOMAIN: $PHP_VERSION";
+  fi
 }
 
 function create_container_for_domain {
@@ -266,8 +278,8 @@ function cpanel_get_userdata () {
 
 function cpanel_create_databases {
   DB_INFO=$($WHMAPI1 list_mysql_databases_and_users --output=json  user=$CPANEL_USER);
-  #echo "DB INFO: $DB_INFO";
-  #TODO: Investigate possible point of failure. Check what are the results when cPanel server has MariaDB installed
+
+  # cPanel stores mysql-version: "10.1", "10.2", etc when MariaDB installed
   local CPANEL_MYSQL_VERSION=$(echo $DB_INFO | $JQ --raw-output ".data.mysql_config.\"mysql-version\"");
   MYSQL_VERSION="${CPANEL_MYSQL_VERSION//[!0-9]/}"
   print_or_log "mysql_version for $CPANEL_USER: $MYSQL_VERSION";
@@ -292,7 +304,7 @@ function create_databases {
 
     case "$RESPONSE" in
       [yY][eE][sS]|[yY] )
-          MYSQLHOST="mysql$MYSQL_VERSION";
+          set_mysqlhost
           CONTAINER_DB_NAME=${CPANEL_DATABASE//_/}; # Underscore on DB name not supported
           local DB_CREATE_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&mysql_host=$MYSQLHOST&database=$CONTAINER_DB_NAME&container=$STACK_NAME" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/add.json");
           local QUERY_STATUS=$(echo $DB_CREATE_QUERY | $JQ --raw-output '.status');
@@ -311,6 +323,35 @@ function create_databases {
           ;;
     esac
   done
+}
+
+function set_mysqlhost {
+  # This is kinda cPanel mysql-version MySQL / MariaDB compatibility list
+  case "$MYSQL_VERSION" in
+    "56" )
+        MYSQLHOST="mysql56"
+        ;;
+    "57" )
+        MYSQLHOST="mysql57"
+        ;;
+    "80" )
+        MYSQLHOST="mysql8"
+        ;;
+    "100" | "101" )
+        MYSQLHOST="mysql56"
+        ;;
+    "102"  | "103" )
+        MYSQLHOST="mysql57"
+        ;;
+    "104" | "105" | "106" )
+        MYSQLHOST="mysql8"
+        ;;
+    * )
+        MYSQLHOST="mysql8"
+        print_or_log "cPanel mysql-version ($MYSQL_VERSION) not found on compatibility list. Fallback option set";
+        ;;
+  esac
+  print_or_log "MySQL hostname selected: $MYSQLHOST";
 }
 
 function create_database_users {
@@ -365,8 +406,8 @@ function copy_database_dump {
         print_or_log "Trying to create dump at \"$DATABASE_DUMP_PATH\"";
         $MYSQLDUMP $CPANEL_DATABASE | $GZIP > $DATABASE_DUMP_PATH;
         print_or_log "Trying to copy dump to the Container's application directory";
-        $RSYNC --rsh="$SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete $DATABASE_DUMP_PATH ${SSH_USERNAME}@${SERVER_IP}:/container/application/
-        # TODO: Error handling
+        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete $DATABASE_DUMP_PATH ${SSH_USERNAME}@${SERVER_IP}:/container/application/ 2>&1)
+        print_or_log "$DEBUG_MSG"
         print_or_log "Removing dump at \"$DATABASE_DUMP_PATH\"";
         rm --force $DATABASE_DUMP_PATH;
         restore_database_from_dump $DATABASE_DUMP_FILENAME;
@@ -388,7 +429,8 @@ function restore_database_from_dump () {
 
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
-        $SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no ${SSH_USERNAME}@${SERVER_IP} "gunzip < /container/application/$DATABASE_DUMP_FILENAME | mysql --host=$MYSQLHOST --user=${CONTAINER_DB_USER} --password=${CONTAINER_DB_USER_PWD} $CONTAINER_DB_NAME"
+        local DEBUG_MSG=$($SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no ${SSH_USERNAME}@${SERVER_IP} "gunzip < /container/application/$DATABASE_DUMP_FILENAME | mysql --host=$MYSQLHOST --user=${CONTAINER_DB_USER} --password=${CONTAINER_DB_USER_PWD} $CONTAINER_DB_NAME" 2>&1)
+        print_or_log "$DEBUG_MSG"
         # TODO: Error handling, check for CONTAINER_DB_USER_PWD and CONTAINER_DB_USER
         ;;
     * )
@@ -461,8 +503,7 @@ function get_last_image_version (){
 
 function check_job_status () {
   local JOB_ID=$1
-  print_or_log "Verify Job ID: $JOB_ID"
-  echo "Checking status of Job ID: $JOB_ID"
+  print_or_log "Job ID $JOB_ID started"
 
   while :; do
 
@@ -471,8 +512,8 @@ function check_job_status () {
     if [ "$QUERY_STATUS" == "true" ]; then
       local JOB_STATE=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '."return"."state"');
       if [ $JOB_STATE == "Completed" ]; then
+        printf "\r"
         print_or_log "Job ID $JOB_ID completed"
-        printf "\rJob ID $JOB_ID completed! \n"
         return
       else
         printf "\r checking ... ---"
@@ -488,7 +529,7 @@ function check_job_status () {
 }
 
 function pick_destination_server {
-  local SERVERS_QUERY=$($CURL --silent "https://api.sitehost.nz/1.1/server/list_all.json?apikey=$API_KEY&client_id=$CLIENT_ID");
+  local SERVERS_QUERY=$($CURL --silent "https://api.sitehost.nz/1.1/server/list_servers.json?apikey=$API_KEY&client_id=$CLIENT_ID&filters%5Bproduct_type%5D=CLDCON");
   local QUERY_STATUS=$(echo $SERVERS_QUERY | $JQ --raw-output '.status');
   if [ "$QUERY_STATUS" == "true" ]; then
     local SERVERS_COUNT=$(( $(echo $SERVERS_QUERY | $JQ --raw-output '.return."total_items"') - 1));
@@ -580,9 +621,8 @@ function copy_website_files {
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
         print_or_log "Trying to copy files from \"$CPANEL_DOCUMENTROOT\" to the Container's public directory";
-        $RSYNC --rsh="$SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete ${CPANEL_DOCUMENTROOT}/ ${SSH_USERNAME}@${SERVER_IP}:/container/application/public/
-        # TODO: Consider if we want to show stats allowing it to throw data into stdout
-        # TODO: Maybe do some error handling and 2>/dev/null ?
+        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete ${CPANEL_DOCUMENTROOT}/ ${SSH_USERNAME}@${SERVER_IP}:/container/application/public/ 2>&1)
+        print_or_log "$DEBUG_MSG"
         ;;
     * )
         print_or_log "Ok, won't copy \"$DOMAIN\" website files";
@@ -647,7 +687,6 @@ if [ -z "$MAIN_DOMAIN" ]; then
       migrate_domain "$CPANEL_DOMAIN_INFO";
     fi
 
-    #sleep 1
   done
 
 else

@@ -18,7 +18,7 @@ This bash script leverages the [SiteHost API](https://docs.sitehost.nz/api/v1.1/
 You may need to install a few extra packages on the Source server:
 
 ```
-yum install jq rsync curl sshpass
+yum install jq oniguruma rsync curl sshpass
 ```
 
 # Usage
