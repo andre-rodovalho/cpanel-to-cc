@@ -110,11 +110,10 @@ function print_or_log () {
 }
 
 function all_done {
-  echo "All done!"
+  echo "All done!";
   echo;
-  echo "=> Log file available at: $LOG_FILE"
-  echo "=> SFTP/SSH credentials for users created at: $SFTP_CREDENTIALS_FILE"
-  echo "=> sDatabase and Database user credentials created at: $DB_CREDENTIALS_FILE"
+  echo "=> SFTP/SSH credentials for users created at: $SFTP_CREDENTIALS_FILE";
+  echo "=> Database and Database user credentials created at: $DB_CREDENTIALS_FILE"''
 }
 
 ################################################ REQUIREMENTS CHECK ####################################################
@@ -183,6 +182,13 @@ mkdir --parents $TMP_DIR; # no error if existing, make parent directories as nee
 
 # Sanity check: verify the basic software quirements are met
 check_software $JQ $WHMAPI1 $RSYNC $CURL $MYSQLDUMP $MYSQL $SSHPASS $SSH $GZIP
+
+# Let user know there's a run log they can check
+# When VERBOSE is true, debug info is printed instead of logged
+if [ "$VERBOSE" = false ]; then
+  echo "=> Run log available at: $LOG_FILE"
+fi
+
 
 ################################################## BASE FUNCTIONS ######################################################
 
@@ -512,11 +518,11 @@ function check_job_status () {
     if [ "$QUERY_STATUS" == "true" ]; then
       local JOB_STATE=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '."return"."state"');
       if [ $JOB_STATE == "Completed" ]; then
-        printf "\r"
+        printf "\r                                                          \r"; # Clean up line
         print_or_log "Job ID $JOB_ID completed"
         return
       else
-        printf "\r checking ... ---"
+        printf "\r checking ... ---";
         nice_wait
       fi
 

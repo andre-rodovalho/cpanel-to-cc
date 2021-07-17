@@ -34,7 +34,17 @@ chmod u+x cpanel-to-cc.sh
 bash cpanel-to-cc.sh --help
 ```
 
-Check the `help` instructions to learn about the valid arguments, options and examples. 
+Check the `help` instructions to learn about all valid arguments, options and examples.
+
+Execution example:
+```
+[root@cloudlinux ~]# ./cpanel-to-cc.sh --client-id 123654 --domain example.co --assume-yes
+=> Run log available at: /tmp/cpanel-to-cc/run.log
+All done!
+
+=> SFTP/SSH credentials for users created at: /tmp/cpanel-to-cc/sftp.csv
+=> Database and Database user credentials created at: /tmp/cpanel-to-cc/databases.csv
+```
 
 # Disclaimer
 
