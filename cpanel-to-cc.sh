@@ -28,13 +28,13 @@
 ################################################### CONFIGURATION ######################################################
 
 # set shell to immediately exit if any command fails with status greater than zero
-# TODO: consider pro and cons of using this
 set -e;
 
 ################################################### DECLARATIONS #######################################################
 
 JQ="/usr/bin/jq"
 WHMAPI1="/usr/sbin/whmapi1"
+UAPI="/usr/local/cpanel/bin/uapi"
 RSYNC="/usr/bin/rsync"
 CURL="/usr/bin/curl"
 MYSQLDUMP="/usr/bin/mysqldump"
@@ -74,6 +74,13 @@ function error_exit {
   # We want to print but also log this event
   echo "[$(timestamp)] $(basename $0): ${1:-"Unknown Error"}" >> $LOG_FILE
   exit 1
+}
+
+function error_print {
+  # This is used for non-critical errors. When we know the script should be able to continue safely
+  echo "$(basename $0): ${1:-"Unknown Error"}" 1>&2
+  # We want to print but also log this event
+  echo "[$(timestamp)] $(basename $0): ${1:-"Unknown Error"}" >> $LOG_FILE
 }
 
 function timestamp {
@@ -181,7 +188,7 @@ done
 mkdir --parents $TMP_DIR; # no error if existing, make parent directories as needed
 
 # Sanity check: verify the basic software quirements are met
-check_software $JQ $WHMAPI1 $RSYNC $CURL $MYSQLDUMP $MYSQL $SSHPASS $SSH $GZIP
+check_software $JQ $WHMAPI1 $RSYNC $CURL $MYSQLDUMP $MYSQL $SSHPASS $SSH $GZIP $UAPI
 
 # Let user know there's a run log they can check
 # When VERBOSE is true, debug info is printed instead of logged
@@ -216,11 +223,7 @@ function migrate_domain () {
 
   create_container_for_domain
 
-  create_ssh_user_for_container
-
-  copy_website_files
-
-  cpanel_create_databases
+  create_databases_for_domain
 
   print_or_log "--- Done ---"
 }
@@ -254,6 +257,7 @@ function create_container_for_domain {
           #echo "Creation results $CREATE_CONTAINER_QUERY";
           local QUERY_JOB_ID=$(echo $CREATE_CONTAINER_QUERY | $JQ --raw-output '."return"."job_id"');
           check_job_status $QUERY_JOB_ID;
+          create_ssh_user_for_container
         else
           local QUERY_MSG=$(echo $CREATE_CONTAINER_QUERY | $JQ --raw-output '."msg"');
           error_exit "$LINENO: Failed creating a Container for \"$DOMAIN\". Message: $QUERY_MSG";
@@ -282,7 +286,7 @@ function cpanel_get_userdata () {
   ALIAS_LIST="${ALIAS_LIST%?}"
 }
 
-function cpanel_create_databases {
+function create_databases_for_domain {
   DB_INFO=$($WHMAPI1 list_mysql_databases_and_users --output=json  user=$CPANEL_USER);
 
   # cPanel stores mysql-version: "10.1", "10.2", etc when MariaDB installed
@@ -319,6 +323,7 @@ function create_databases {
             print_or_log "Trying to create database name \"$CONTAINER_DB_NAME\"";
             check_job_status $QUERY_JOB_ID;
             create_database_users $CPANEL_DATABASE;
+            copy_database_dump $CPANEL_DATABASE;
           else
             local QUERY_MSG=$(echo $DB_CREATE_QUERY | $JQ --raw-output '."msg"');
             error_exit "$LINENO: Failed creating database: $CONTAINER_DB_NAME. Message: $QUERY_MSG";
@@ -373,19 +378,18 @@ function create_database_users {
     case "$RESPONSE" in
       [yY][eE][sS]|[yY] )
           CONTAINER_DB_USER=${CPANEL_DATABASE_USER//_/}; # Underscore on DB users not supported
-          CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16
-          # TODO: Check the data here, get user grants from cPanel
-          local DB_USER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&mysql_host=$MYSQLHOST&username=$CONTAINER_DB_USER&password=$CONTAINER_DB_USER_PWD&database=$CONTAINER_DB_NAME&grants[]=select&grants[]=insert&grants[]=update&grants[]=delete&grants[]=create&grants[]=drop&grants[]=alter&grants[]=index&grants[]=create view&grants[]=show view&grants[]=lock tables&grants[]=create temporary tables" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
+          CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16jobspecs
+          get_database_user_grants $CPANEL_DATABASE $CPANEL_DATABASE_USER
+          local DB_USER_QUERY=$($CURL --data "apikey=${API_KEY}&client_id=${CLIENT_ID}&server_name=${SERVER_NAME}&mysql_host=${MYSQLHOST}&username=${CONTAINER_DB_USER}&password=${CONTAINER_DB_USER_PWD}&database=${CONTAINER_DB_NAME}${GRANT_STRING}" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
           local QUERY_STATUS=$(echo $DB_USER_QUERY | $JQ --raw-output '.status');
           if [ "$QUERY_STATUS" == "true" ]; then
             local QUERY_JOB_ID=$(echo $DB_USER_QUERY | $JQ --raw-output '."return"."job_id"');
-            print_or_log "Trying to create database user \"$CPANEL_DATABASE_USER\" with password \"$CONTAINER_DB_USER_PWD\"";
+            print_or_log "Trying to create database user \"$CONTAINER_DB_USER\" with password \"$CONTAINER_DB_USER_PWD\"";
             check_job_status $QUERY_JOB_ID;
             record_database_user_credentials
-            copy_database_dump $CPANEL_DATABASE;
           else
             local QUERY_MSG=$(echo $DB_USER_QUERY | $JQ --raw-output '."msg"');
-            error_exit "$LINENO: Failed creating database user: $CPANEL_DATABASE_USER. Message: $QUERY_MSG";
+            error_print "$LINENO: Failed creating database user: $CONTAINER_DB_USER. Message: $QUERY_MSG";
           fi
           ;;
       * )
@@ -395,6 +399,27 @@ function create_database_users {
   done
 }
 
+function get_database_user_grants (){
+  GRANT_STRING=""
+  local CPANEL_DATABASE=$1
+  local CPANEL_DATABASE_USER=$2
+  local DB_USER_PRIVILEGES_ON_DB=$($UAPI --output=json Mysql get_privileges_on_database user=$CPANEL_DATABASE_USER database=$CPANEL_DATABASE --user=$CPANEL_USER);
+  local PRIVILEGES_LIST=$(echo $DB_USER_PRIVILEGES_ON_DB | $JQ --raw-output '."result"."data"');
+  local PRIVILEGES_LIST_LENGTH=$(echo $PRIVILEGES_LIST | $JQ --raw-output 'length');
+  for (( i=0; i<$PRIVILEGES_LIST_LENGTH; i++ )); do
+    local PRIVILEGE=$(echo $PRIVILEGES_LIST | jq --raw-output ".[$i]");
+      case "$PRIVILEGE" in
+        "ALL PRIVILEGES" )
+            GRANT_STRING="&grants[]=select&grants[]=insert&grants[]=update&grants[]=delete&grants[]=create&grants[]=drop&grants[]=alter&grants[]=index&grants[]=create view&grants[]=show view&grants[]=lock tables&grants[]=create temporary tables"
+            ;;
+        * )
+            local PRIVILEGE_LOWERCASE=$(echo $PRIVILEGE | tr '[:upper:]' '[:lower:]');
+            GRANT_STRING="${GRANT_STRING}&grants[]=${PRIVILEGE_LOWERCASE}";
+            ;;
+      esac
+  done
+  print_or_log "GRANTS for $CONTAINER_DB_USER: $GRANT_STRING";
+}
 
 function copy_database_dump {
   local CPANEL_DATABASE=$1
@@ -503,7 +528,7 @@ function get_last_image_version (){
     local IMAGE_VERSION="${IMAGE_VERSIONS##*$'\n'}";
     echo $IMAGE_VERSION;
   else
-    error_exit "$LINENO: Cannot list SiteHost Cloud Container images"
+    error_exit "$LINENO: Cannot list SiteHost Cloud Container images";
   fi
 }
 
@@ -605,6 +630,7 @@ function create_ssh_user_for_container {
           local QUERY_JOB_ID=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."return"."job_id"');
           check_job_status $QUERY_JOB_ID;
           record_sftp_credentials
+          copy_website_files
         else
           local QUERY_MSG=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."msg"');
           error_exit "$LINENO: Cannot create SFTP/SSH user $SSH_USERNAME. Message: $QUERY_MSG"
@@ -617,7 +643,6 @@ function create_ssh_user_for_container {
 }
 
 function copy_website_files {
-  # TODO: This depends on SSH credentials we only have if we created SFTP user on the runtime. Maybe do error handling or implement alternative methods.
   if [ "$YES_TO_ALL" = false ]; then
     read -p "Would you like to copy website files to the \"$DOMAIN\" Container? [y/N]: " RESPONSE;
   else
@@ -685,10 +710,9 @@ if [ -z "$MAIN_DOMAIN" ]; then
     CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[$d]");
     DOMAIN_TYPE=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain_type"');
 
-    # We ignore any "domain_type" : "sub"
-    # These are eduplicates of "domain_type" : "addon"
-    # We ignore "domain_type" : "parked"
-    # Unless it has specified it to be moved
+    # We ignore any "domain_type" : "sub" because they are duplicates of "domain_type" : "addon"
+    # We ignore "domain_type" : "parked" as these are Aliases of another Virtual Host.
+    # We'd still try to migrate a "domain_type" : "parked" if specified via command line
     if [ $DOMAIN_TYPE == "main" -o $DOMAIN_TYPE == "addon" ]; then
       migrate_domain "$CPANEL_DOMAIN_INFO";
     fi
