@@ -48,6 +48,9 @@ SFTP_CREDENTIALS_FILE="${TMP_DIR}/sftp.csv"
 DB_CREDENTIALS_FILE="${TMP_DIR}/databases.csv"
 VERBOSE=false
 YES_TO_ALL=false
+CONTAINER_CREATED=false
+SFTP_USER_CREATED=false
+DB_USER_CREATED=false
 
 ################################################# HELPER FUNCTIONS #####################################################
 
@@ -257,7 +260,8 @@ function create_container_for_domain {
           #echo "Creation results $CREATE_CONTAINER_QUERY";
           local QUERY_JOB_ID=$(echo $CREATE_CONTAINER_QUERY | $JQ --raw-output '."return"."job_id"');
           check_job_status $QUERY_JOB_ID;
-          create_ssh_user_for_container
+          CONTAINER_CREATED=true;
+          create_sftp_user_for_container
         else
           local QUERY_MSG=$(echo $CREATE_CONTAINER_QUERY | $JQ --raw-output '."msg"');
           error_exit "$LINENO: Failed creating a Container for \"$DOMAIN\". Message: $QUERY_MSG";
@@ -287,6 +291,12 @@ function cpanel_get_userdata () {
 }
 
 function create_databases_for_domain {
+  if [ "$CONTAINER_CREATED" = false ]; then
+    # We can only create a database on a SiteHost Cloud Container server if we specify a Container name.
+    print_or_log "Skipping create_databases_for_domain, Container not created on the runtime"
+    return;
+  fi
+
   DB_INFO=$($WHMAPI1 list_mysql_databases_and_users --output=json  user=$CPANEL_USER);
 
   # cPanel stores mysql-version: "10.1", "10.2", etc when MariaDB installed
@@ -378,7 +388,7 @@ function create_database_users {
     case "$RESPONSE" in
       [yY][eE][sS]|[yY] )
           CONTAINER_DB_USER=${CPANEL_DATABASE_USER//_/}; # Underscore on DB users not supported
-          CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16jobspecs
+          CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16
           get_database_user_grants $CPANEL_DATABASE $CPANEL_DATABASE_USER
           local DB_USER_QUERY=$($CURL --data "apikey=${API_KEY}&client_id=${CLIENT_ID}&server_name=${SERVER_NAME}&mysql_host=${MYSQLHOST}&username=${CONTAINER_DB_USER}&password=${CONTAINER_DB_USER_PWD}&database=${CONTAINER_DB_NAME}${GRANT_STRING}" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
           local QUERY_STATUS=$(echo $DB_USER_QUERY | $JQ --raw-output '.status');
@@ -386,6 +396,7 @@ function create_database_users {
             local QUERY_JOB_ID=$(echo $DB_USER_QUERY | $JQ --raw-output '."return"."job_id"');
             print_or_log "Trying to create database user \"$CONTAINER_DB_USER\" with password \"$CONTAINER_DB_USER_PWD\"";
             check_job_status $QUERY_JOB_ID;
+            DB_USER_CREATED=true;
             record_database_user_credentials
           else
             local QUERY_MSG=$(echo $DB_USER_QUERY | $JQ --raw-output '."msg"');
@@ -399,7 +410,7 @@ function create_database_users {
   done
 }
 
-function get_database_user_grants (){
+function get_database_user_grants {
   GRANT_STRING=""
   local CPANEL_DATABASE=$1
   local CPANEL_DATABASE_USER=$2
@@ -423,7 +434,13 @@ function get_database_user_grants (){
 
 function copy_database_dump {
   local CPANEL_DATABASE=$1
-  # TODO: This depends on SSH credentials we only have if we created SFTP user on the runtime. Maybe do error handling or implement alternative methods.
+
+  if [ "$SFTP_USER_CREATED" = false ]; then
+    # This function depends on SFTP credentials we only have if we create that on the runtime.
+    print_or_log "Skipping copy_database_dump, SFTP user not created on the runtime"
+    return;
+  fi
+
   if [ "$YES_TO_ALL" = false ]; then
     read -p "Would you like to backup the database \"$CPANEL_DATABASE\" and restore it on the Container? [y/N]: " RESPONSE;
   else
@@ -452,6 +469,13 @@ function copy_database_dump {
 
 function restore_database_from_dump () {
   local DATABASE_DUMP_FILENAME=$1
+
+  if [ "$DB_USER_CREATED" = false ]; then
+    # This function depends on database user credentials we only have if we create that on the runtime.
+    print_or_log "Skipping restore_database_from_dump, database user not created on the runtime"
+    return;
+  fi
+
   if [ "$YES_TO_ALL" = false ]; then
     read -p "Would you like to restore the \"$CONTAINER_DB_NAME\" on the Container? [y/N]: " RESPONSE;
   else
@@ -462,7 +486,6 @@ function restore_database_from_dump () {
     [yY][eE][sS]|[yY] )
         local DEBUG_MSG=$($SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no ${SSH_USERNAME}@${SERVER_IP} "gunzip < /container/application/$DATABASE_DUMP_FILENAME | mysql --host=$MYSQLHOST --user=${CONTAINER_DB_USER} --password=${CONTAINER_DB_USER_PWD} $CONTAINER_DB_NAME" 2>&1)
         print_or_log "$DEBUG_MSG"
-        # TODO: Error handling, check for CONTAINER_DB_USER_PWD and CONTAINER_DB_USER
         ;;
     * )
         print_or_log "Ok, won't try to restore the \"$CONTAINER_DB_NAME\" from the dump file";
@@ -612,7 +635,7 @@ function pick_destination_server {
   print_or_log "Working with server name: $SERVER_NAME on IPv4: $SERVER_IP";
 }
 
-function create_ssh_user_for_container {
+function create_sftp_user_for_container {
   if [ "$YES_TO_ALL" = false ]; then
     read -p "Would you like to create an SFTP/SSH user to access the \"$DOMAIN\" Container? [y/N]: " RESPONSE;
   else
@@ -629,6 +652,7 @@ function create_ssh_user_for_container {
         if [ "$QUERY_STATUS" == "true" ]; then
           local QUERY_JOB_ID=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."return"."job_id"');
           check_job_status $QUERY_JOB_ID;
+          SFTP_USER_CREATED=true;
           record_sftp_credentials
           copy_website_files
         else
