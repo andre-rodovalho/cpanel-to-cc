@@ -72,18 +72,16 @@ function help_text {
   echo;
 }
 
-function error_exit {
-  echo "$(basename $0): ${1:-"Unknown Error"}" 1>&2
+function error_handler {
+  MSG=${1:-"Unknown Error"}
+  EXIT=${2:-true}
+  echo "$(basename $0): $MSG" 1>&2
   # We want to print but also log this event
-  echo "[$(timestamp)] $(basename $0): ${1:-"Unknown Error"}" >> $LOG_FILE
-  exit 1
-}
-
-function error_print {
-  # This is used for non-critical errors. When we know the script should be able to continue safely
-  echo "$(basename $0): ${1:-"Unknown Error"}" 1>&2
-  # We want to print but also log this event
-  echo "[$(timestamp)] $(basename $0): ${1:-"Unknown Error"}" >> $LOG_FILE
+  echo "[$(timestamp)] $(basename $0): $MSG" >> $LOG_FILE
+  # If it's not a critical error we can continue safely
+  if [ "$EXIT" = true ]; then
+    exit 1
+  fi
 }
 
 function timestamp {
@@ -107,7 +105,7 @@ function get_random_password () {
     # If length not specified
     LENGTH=16;
   fi
-  echo "$(< /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c $LENGTH)";
+  echo "$(< /dev/urandom tr -dc .?@*_A-Za-z0-9 | head -c $LENGTH)";
 }
 
 function print_or_log () {
@@ -131,7 +129,7 @@ function all_done {
 function check_software () {
   while [ "$1" != "" ]; do
     if ! command -v $1 &> /dev/null; then
-      error_exit "$1 could not be found: Please verify it's installed and what is the full path to it";
+      error_handler "$1 could not be found: Please verify it's installed and what is the full path to it";
     fi
     # Next parameter passed
     shift
@@ -264,7 +262,7 @@ function create_container_for_domain {
           create_sftp_user_for_container
         else
           local QUERY_MSG=$(echo $CREATE_CONTAINER_QUERY | $JQ --raw-output '."msg"');
-          error_exit "$LINENO: Failed creating a Container for \"$DOMAIN\". Message: $QUERY_MSG";
+          error_handler "$LINENO: Failed creating a Container for \"$DOMAIN\". Message: $QUERY_MSG";
         fi
         ;;
     * )
@@ -336,7 +334,7 @@ function create_databases {
             copy_database_dump $CPANEL_DATABASE;
           else
             local QUERY_MSG=$(echo $DB_CREATE_QUERY | $JQ --raw-output '."msg"');
-            error_exit "$LINENO: Failed creating database: $CONTAINER_DB_NAME. Message: $QUERY_MSG";
+            error_handler "$LINENO: Failed creating database: $CONTAINER_DB_NAME. Message: $QUERY_MSG";
           fi
           ;;
       * )
@@ -387,7 +385,7 @@ function create_database_users {
 
     case "$RESPONSE" in
       [yY][eE][sS]|[yY] )
-          CONTAINER_DB_USER=${CPANEL_DATABASE_USER//_/}; # Underscore on DB users not supported
+          CONTAINER_DB_USER=$(echo ${CPANEL_DATABASE_USER//_/} | head -c 16); # Underscore on DB users not supported, max length is 16
           CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16
           get_database_user_grants $CPANEL_DATABASE $CPANEL_DATABASE_USER
           local DB_USER_QUERY=$($CURL --data "apikey=${API_KEY}&client_id=${CLIENT_ID}&server_name=${SERVER_NAME}&mysql_host=${MYSQLHOST}&username=${CONTAINER_DB_USER}&password=${CONTAINER_DB_USER_PWD}&database=${CONTAINER_DB_NAME}${GRANT_STRING}" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
@@ -400,7 +398,7 @@ function create_database_users {
             record_database_user_credentials
           else
             local QUERY_MSG=$(echo $DB_USER_QUERY | $JQ --raw-output '."msg"');
-            error_print "$LINENO: Failed creating database user: $CONTAINER_DB_USER. Message: $QUERY_MSG";
+            error_handler "$LINENO: Failed creating database user: $CONTAINER_DB_USER. Message: $QUERY_MSG" "false";
           fi
           ;;
       * )
@@ -538,7 +536,7 @@ function get_random_name {
     local NAME=$(echo $NAME_QUERY | $JQ --raw-output '.return.name');
     echo $NAME;
   else
-    error_exit "$LINENO: Cannot get a random Container Name"
+    error_handler "$LINENO: Cannot get a random Container Name"
   fi
 }
 
@@ -551,7 +549,7 @@ function get_last_image_version (){
     local IMAGE_VERSION="${IMAGE_VERSIONS##*$'\n'}";
     echo $IMAGE_VERSION;
   else
-    error_exit "$LINENO: Cannot list SiteHost Cloud Container images";
+    error_handler "$LINENO: Cannot list SiteHost Cloud Container images";
   fi
 }
 
@@ -576,7 +574,7 @@ function check_job_status () {
 
     else
       local QUERY_MSG=$(echo $JOB_CHECK_QUERY | $JQ --raw-output '."msg"');
-      error_exit "$LINENO: Failed checking status of Job ID: $JOB_ID. Message: $QUERY_MSG";
+      error_handler "$LINENO: Failed checking status of Job ID: $JOB_ID. Message: $QUERY_MSG";
     fi
 
   done
@@ -590,7 +588,7 @@ function pick_destination_server {
     case $SERVERS_COUNT in
       -1 )
         # No Cloud Container server on the account
-        error_exit "$LINENO: Cannot find a Cloud Container server on the account ID $CLIENT_ID"
+        error_handler "$LINENO: Cannot find a Cloud Container server on the account ID $CLIENT_ID"
         ;;
 
       0 )
@@ -629,7 +627,7 @@ function pick_destination_server {
 
   else
     local QUERY_MSG=$(echo $SERVERS_QUERY | $JQ --raw-output '."msg"');
-    error_exit "$LINENO: Cannot list Cloud Container servers on the account $CLIENT_ID. Message: $QUERY_MSG"
+    error_handler "$LINENO: Cannot list Cloud Container servers on the account $CLIENT_ID. Message: $QUERY_MSG"
   fi
 
   print_or_log "Working with server name: $SERVER_NAME on IPv4: $SERVER_IP";
@@ -657,7 +655,7 @@ function create_sftp_user_for_container {
           copy_website_files
         else
           local QUERY_MSG=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."msg"');
-          error_exit "$LINENO: Cannot create SFTP/SSH user $SSH_USERNAME. Message: $QUERY_MSG"
+          error_handler "$LINENO: Cannot create SFTP/SSH user $SSH_USERNAME. Message: $QUERY_MSG"
         fi
         ;;
     * )
@@ -693,7 +691,7 @@ function get_api_key {
       print_or_log "API key file found at $API_FILE, loading it";
       API_KEY=$(cat $API_FILE)
     else
-      error_exit "$LINENO: API key not found, please specify";
+      error_handler "$LINENO: API key not found, please specify";
     fi
   fi
 }
@@ -702,18 +700,22 @@ function record_sftp_credentials () {
   touch $SFTP_CREDENTIALS_FILE;
   if [ $(wc -l <$SFTP_CREDENTIALS_FILE) -eq "0" ]; then
     # File is empty, let's put in the "headers"
-    echo -e "SERVER_IP\t SFTP_USERNAME\t USER_PASSWORD" >> $SFTP_CREDENTIALS_FILE;
+    print_or_log "Recording header in $SFTP_CREDENTIALS_FILE";
+    echo -e "SERVER_IP,SFTP_USERNAME,USER_PASSWORD,DOMAIN" >> $SFTP_CREDENTIALS_FILE;
   fi
-  echo -e "$SERVER_IP\t $SSH_USERNAME\t $SSH_PASSWORD" >> $SFTP_CREDENTIALS_FILE;
+  print_or_log "Recording SFTP details in $SFTP_CREDENTIALS_FILE";
+  echo -e "$SERVER_IP,$SSH_USERNAME,$SSH_PASSWORD,$DOMAIN" >> $SFTP_CREDENTIALS_FILE;
 }
 
 function record_database_user_credentials () {
   touch $DB_CREDENTIALS_FILE;
   if [ $(wc -l <$DB_CREDENTIALS_FILE) -eq "0" ]; then
     # File is empty, let's put in the "headers"
-    echo -e "CPANEL_DB_USER\t CONTAINER_DB_USER\t CONTAINER_DB_USER_PWD" >> $DB_CREDENTIALS_FILE;
+    print_or_log "Recording header in $DB_CREDENTIALS_FILE";
+    echo -e "CPANEL_DB_USER,CONTAINER_DB_USE,CONTAINER_DB_USER_PW,DOMAIN" >> $DB_CREDENTIALS_FILE;
   fi
-  echo -e "$CPANEL_DATABASE_USER\t $CONTAINER_DB_USER\t $CONTAINER_DB_USER_PWD" >> $DB_CREDENTIALS_FILE;
+  print_or_log "Recording Database details in $DB_CREDENTIALS_FILE";
+  echo -e "$CPANEL_DATABASE_USER,$CONTAINER_DB_USER,$CONTAINER_DB_USER_PWD,$DOMAIN" >> $DB_CREDENTIALS_FILE;
 }
 
 #################################################### BASE LOGIC ########################################################
