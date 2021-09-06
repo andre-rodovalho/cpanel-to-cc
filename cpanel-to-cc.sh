@@ -49,8 +49,9 @@ DB_CREDENTIALS_FILE="${TMP_DIR}/databases.csv"
 VERBOSE=false
 YES_TO_ALL=false
 CONTAINER_CREATED=false
-SFTP_USER_CREATED=false
-DB_USER_CREATED=false
+SFTP_CRENTIALS_ON_FILE=false
+CONTAINER_DB_CRENTIALS_ON_FILE=false
+RESYNC=false
 
 ################################################# HELPER FUNCTIONS #####################################################
 
@@ -162,7 +163,7 @@ while [ "$1" != "" ]; do
     # cPanel domain to migrate
     "-d" | "--domain" )
       shift
-      MAIN_DOMAIN=$1
+      DOMAIN_SPECIFIED=$1
     ;;
 
     # Path to directory we store temporary files and logs
@@ -177,6 +178,10 @@ while [ "$1" != "" ]; do
 
     "-y" | "--assume-yes" )
       YES_TO_ALL=true
+    ;;
+
+    "-r" | "--resync" )
+      RESYNC=true
     ;;
 
 	esac
@@ -202,7 +207,7 @@ fi
 
 function migrate_domain () {
   local CPANEL_DOMAIN_DATA=$1
-  print_or_log "--- Starting up ---"
+  print_or_log "--- Starting up migration ---"
 
   DOMAIN=$(echo $CPANEL_DOMAIN_DATA | $JQ --raw-output '."domain"');
   print_or_log "domain: $DOMAIN";
@@ -219,14 +224,13 @@ function migrate_domain () {
   STACK_NAME=$(get_random_name)
   IMAGE_CODE="sitehost-php$PHP_VERSION-apache";
   IMAGE_VERSION=$(get_last_image_version $IMAGE_CODE);
-  DOCKERFILE=$(build_dockerfile $STACK_NAME $DOMAIN $IMAGE_CODE $IMAGE_VERSION $VHOSTS)
-  #echo; echo $DOCKERFILE; echo;
+  COMPOSEFILE=$(build_dockerfile $STACK_NAME $DOMAIN $IMAGE_CODE $IMAGE_VERSION $VHOSTS)
 
   create_container_for_domain
 
   create_databases_for_domain
 
-  print_or_log "--- Done ---"
+  print_or_log "--- Migration done ---"
 }
 
 function set_php_version {
@@ -252,7 +256,7 @@ function create_container_for_domain {
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
         print_or_log "Yes, creating Container on $SERVER_NAME with IP $SERVER_IP";
-        local CREATE_CONTAINER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server=$SERVER_NAME&name=$STACK_NAME&label=$DOMAIN&enable_ssl=0&docker_compose=$DOCKERFILE" --request POST --silent "https://api.sitehost.nz/1.1/cloud/stack/add.json");
+        local CREATE_CONTAINER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server=$SERVER_NAME&name=$STACK_NAME&label=$DOMAIN&enable_ssl=0&docker_compose=$COMPOSEFILE" --request POST --silent "https://api.sitehost.nz/1.1/cloud/stack/add.json");
         local QUERY_STATUS=$(echo $CREATE_CONTAINER_QUERY | $JQ --raw-output '.status');
         if [ "$QUERY_STATUS" == "true" ]; then
           #echo "Creation results $CREATE_CONTAINER_QUERY";
@@ -302,8 +306,8 @@ function create_databases_for_domain {
   MYSQL_VERSION="${CPANEL_MYSQL_VERSION//[!0-9]/}"
   print_or_log "mysql_version for $CPANEL_USER: $MYSQL_VERSION";
 
-  CPANEL_DATABASES_ARRAY=$(echo $DB_INFO | $JQ --raw-output '.data."mysql_databases" | keys');
-  local NUMBER_OF_DATABASES=$(echo $CPANEL_DATABASES_ARRAY | $JQ --raw-output 'length');
+  CPANEL_DBS_ARRAY=$(echo $DB_INFO | $JQ --raw-output '.data."mysql_databases" | keys');
+  local NUMBER_OF_DATABASES=$(echo $CPANEL_DBS_ARRAY | $JQ --raw-output 'length');
   if [ "$NUMBER_OF_DATABASES" -gt "0" ]; then
     create_databases
   else
@@ -312,10 +316,10 @@ function create_databases_for_domain {
 }
 
 function create_databases {
-  local CPANEL_DATABASES=$(echo $CPANEL_DATABASES_ARRAY | $JQ --raw-output '.[]');
-  for CPANEL_DATABASE in $CPANEL_DATABASES; do
+  local CPANEL_DBS=$(echo $CPANEL_DBS_ARRAY | $JQ --raw-output '.[]');
+  for CPANEL_DB in $CPANEL_DBS; do
     if [ "$YES_TO_ALL" = false ]; then
-      read -p "Would you like to create a database to replace \"$CPANEL_DATABASE\" on the server? [y/N]: " RESPONSE;
+      read -p "Would you like to create a database to replace \"$CPANEL_DB\" on the server? [y/N]: " RESPONSE;
     else
       RESPONSE="yes"
     fi
@@ -323,22 +327,22 @@ function create_databases {
     case "$RESPONSE" in
       [yY][eE][sS]|[yY] )
           set_mysqlhost
-          CONTAINER_DB_NAME=${CPANEL_DATABASE//_/}; # Underscore on DB name not supported
+          CONTAINER_DB_NAME=${CPANEL_DB//_/}; # Underscore on DB name not supported
           local DB_CREATE_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&mysql_host=$MYSQLHOST&database=$CONTAINER_DB_NAME&container=$STACK_NAME" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/add.json");
           local QUERY_STATUS=$(echo $DB_CREATE_QUERY | $JQ --raw-output '.status');
           if [ "$QUERY_STATUS" == "true" ]; then
             local QUERY_JOB_ID=$(echo $DB_CREATE_QUERY | $JQ --raw-output '."return"."job_id"');
             print_or_log "Trying to create database name \"$CONTAINER_DB_NAME\"";
             check_job_status $QUERY_JOB_ID;
-            create_database_users $CPANEL_DATABASE;
-            copy_database_dump $CPANEL_DATABASE;
+            create_database_users $CPANEL_DB;
+            copy_database_dump $CPANEL_DB;
           else
             local QUERY_MSG=$(echo $DB_CREATE_QUERY | $JQ --raw-output '."msg"');
             error_handler "$LINENO: Failed creating database: $CONTAINER_DB_NAME. Message: $QUERY_MSG";
           fi
           ;;
       * )
-          print_or_log "Ok, won't create a replacement for $CPANEL_DATABASE";
+          print_or_log "Ok, won't create a replacement for $CPANEL_DB";
           ;;
     esac
   done
@@ -374,35 +378,35 @@ function set_mysqlhost {
 }
 
 function create_database_users {
-  local CPANEL_DATABASE=$1
-  local CPANEL_DATABASE_USERS=$(echo $DB_INFO | $JQ --raw-output ".\"data\".\"mysql_databases\".\"$CPANEL_DATABASE\"[]");
-  for CPANEL_DATABASE_USER in $CPANEL_DATABASE_USERS; do
+  local CPANEL_DB=$1
+  local CPANEL_DB_USRS=$(echo $DB_INFO | $JQ --raw-output ".\"data\".\"mysql_databases\".\"$CPANEL_DB\"[]");
+  for CPANEL_DB_USR in $CPANEL_DB_USRS; do
     if [ "$YES_TO_ALL" = false ]; then
-      read -p "Would you like to create a database user to replace \"$CPANEL_DATABASE_USER\" on the server? [y/N]: " RESPONSE;
+      read -p "Would you like to create a database user to replace \"$CPANEL_DB_USR\" on the server? [y/N]: " RESPONSE;
     else
       RESPONSE="yes"
     fi
 
     case "$RESPONSE" in
       [yY][eE][sS]|[yY] )
-          CONTAINER_DB_USER=$(echo ${CPANEL_DATABASE_USER//_/} | head -c 16); # Underscore on DB users not supported, max length is 16
-          CONTAINER_DB_USER_PWD=$(get_random_password); # Max length is 16
-          get_database_user_grants $CPANEL_DATABASE $CPANEL_DATABASE_USER
-          local DB_USER_QUERY=$($CURL --data "apikey=${API_KEY}&client_id=${CLIENT_ID}&server_name=${SERVER_NAME}&mysql_host=${MYSQLHOST}&username=${CONTAINER_DB_USER}&password=${CONTAINER_DB_USER_PWD}&database=${CONTAINER_DB_NAME}${GRANT_STRING}" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
+          CONTAINER_DB_USR=$(echo ${CPANEL_DB_USR//_/} | head -c 16); # Underscore on DB users not supported, max length is 16
+          CONTAINER_DB_USR_PSWD=$(get_random_password); # Max length is 16
+          get_database_user_grants $CPANEL_DB $CPANEL_DB_USR
+          local DB_USER_QUERY=$($CURL --data "apikey=${API_KEY}&client_id=${CLIENT_ID}&server_name=${SERVER_NAME}&mysql_host=${MYSQLHOST}&username=${CONTAINER_DB_USR}&password=${CONTAINER_DB_USR_PSWD}&database=${CONTAINER_DB_NAME}${GRANT_STRING}" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
           local QUERY_STATUS=$(echo $DB_USER_QUERY | $JQ --raw-output '.status');
           if [ "$QUERY_STATUS" == "true" ]; then
             local QUERY_JOB_ID=$(echo $DB_USER_QUERY | $JQ --raw-output '."return"."job_id"');
-            print_or_log "Trying to create database user \"$CONTAINER_DB_USER\" with password \"$CONTAINER_DB_USER_PWD\"";
+            print_or_log "Trying to create database user \"$CONTAINER_DB_USR\" with password \"$CONTAINER_DB_USR_PSWD\"";
             check_job_status $QUERY_JOB_ID;
-            DB_USER_CREATED=true;
+            CONTAINER_DB_CRENTIALS_ON_FILE=true;
             record_database_user_credentials
           else
             local QUERY_MSG=$(echo $DB_USER_QUERY | $JQ --raw-output '."msg"');
-            error_handler "$LINENO: Failed creating database user: $CONTAINER_DB_USER. Message: $QUERY_MSG" "false";
+            error_handler "$LINENO: Failed creating database user: $CONTAINER_DB_USR. Message: $QUERY_MSG" "false";
           fi
           ;;
       * )
-          print_or_log "Ok, won't create a replacement database user for $CPANEL_DATABASE_USER";
+          print_or_log "Ok, won't create a replacement database user for $CPANEL_DB_USR";
           ;;
     esac
   done
@@ -410,9 +414,9 @@ function create_database_users {
 
 function get_database_user_grants {
   GRANT_STRING=""
-  local CPANEL_DATABASE=$1
-  local CPANEL_DATABASE_USER=$2
-  local DB_USER_PRIVILEGES_ON_DB=$($UAPI --output=json Mysql get_privileges_on_database user=$CPANEL_DATABASE_USER database=$CPANEL_DATABASE --user=$CPANEL_USER);
+  local CPANEL_DB=$1
+  local CPANEL_DB_USR=$2
+  local DB_USER_PRIVILEGES_ON_DB=$($UAPI --output=json Mysql get_privileges_on_database user=$CPANEL_DB_USR database=$CPANEL_DB --user=$CPANEL_USER);
   local PRIVILEGES_LIST=$(echo $DB_USER_PRIVILEGES_ON_DB | $JQ --raw-output '."result"."data"');
   local PRIVILEGES_LIST_LENGTH=$(echo $PRIVILEGES_LIST | $JQ --raw-output 'length');
   for (( i=0; i<$PRIVILEGES_LIST_LENGTH; i++ )); do
@@ -427,39 +431,39 @@ function get_database_user_grants {
             ;;
       esac
   done
-  print_or_log "GRANTS for $CONTAINER_DB_USER: $GRANT_STRING";
+  print_or_log "GRANTS for $CONTAINER_DB_USR: $GRANT_STRING";
 }
 
 function copy_database_dump {
-  local CPANEL_DATABASE=$1
+  local CPANEL_DB=$1
 
-  if [ "$SFTP_USER_CREATED" = false ]; then
+  if [ "$SFTP_CRENTIALS_ON_FILE" = false ]; then
     # This function depends on SFTP credentials we only have if we create that on the runtime.
     print_or_log "Skipping copy_database_dump, SFTP user not created on the runtime"
     return;
   fi
 
   if [ "$YES_TO_ALL" = false ]; then
-    read -p "Would you like to backup the database \"$CPANEL_DATABASE\" and restore it on the Container? [y/N]: " RESPONSE;
+    read -p "Would you like to backup the database \"$CPANEL_DB\" and copy it to the Container? [y/N]: " RESPONSE;
   else
     RESPONSE="yes"
   fi
 
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
-        local DATABASE_DUMP_FILENAME=$(echo ${CPANEL_DATABASE}_$(fulldate).sql.gz)
+        local DATABASE_DUMP_FILENAME=$(echo ${CPANEL_DB}_$(fulldate).sql.gz)
         local DATABASE_DUMP_PATH=$(echo ${TMP_DIR}/${DATABASE_DUMP_FILENAME});
         print_or_log "Trying to create dump at \"$DATABASE_DUMP_PATH\"";
-        $MYSQLDUMP $CPANEL_DATABASE | $GZIP > $DATABASE_DUMP_PATH;
+        $MYSQLDUMP $CPANEL_DB | $GZIP > $DATABASE_DUMP_PATH;
         print_or_log "Trying to copy dump to the Container's application directory";
-        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete $DATABASE_DUMP_PATH ${SSH_USERNAME}@${SERVER_IP}:/container/application/ 2>&1)
+        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete $DATABASE_DUMP_PATH ${SFTP_USR}@${SERVER_IP}:/container/application/ 2>&1)
         print_or_log "$DEBUG_MSG"
         print_or_log "Removing dump at \"$DATABASE_DUMP_PATH\"";
         rm --force $DATABASE_DUMP_PATH;
         restore_database_from_dump $DATABASE_DUMP_FILENAME;
         ;;
     * )
-        print_or_log "Ok, won't store a database backup of \"$CPANEL_DATABASE\" on the Container";
+        print_or_log "Ok, won't store a database backup of \"$CPANEL_DB\" on the Container";
         ;;
   esac
 
@@ -468,7 +472,7 @@ function copy_database_dump {
 function restore_database_from_dump () {
   local DATABASE_DUMP_FILENAME=$1
 
-  if [ "$DB_USER_CREATED" = false ]; then
+  if [ "$CONTAINER_DB_CRENTIALS_ON_FILE" = false ]; then
     # This function depends on database user credentials we only have if we create that on the runtime.
     print_or_log "Skipping restore_database_from_dump, database user not created on the runtime"
     return;
@@ -482,7 +486,7 @@ function restore_database_from_dump () {
 
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
-        local DEBUG_MSG=$($SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no ${SSH_USERNAME}@${SERVER_IP} "gunzip < /container/application/$DATABASE_DUMP_FILENAME | mysql --host=$MYSQLHOST --user=${CONTAINER_DB_USER} --password=${CONTAINER_DB_USER_PWD} $CONTAINER_DB_NAME" 2>&1)
+        local DEBUG_MSG=$($SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no ${SFTP_USR}@${SERVER_IP} "gunzip < /container/application/$DATABASE_DUMP_FILENAME | mysql --host=$MYSQLHOST --user=${CONTAINER_DB_USR} --password=${CONTAINER_DB_USR_PSWD} $CONTAINER_DB_NAME" 2>&1)
         print_or_log "$DEBUG_MSG"
         ;;
     * )
@@ -497,7 +501,7 @@ function build_dockerfile () {
   local IMAGE_CODE=$3
   local IMAGE_VERSION=$4
   local VHOSTS=$5
-  DOCKERFILE_TEMPLATE="
+  COMPOSEFILE_TEMPLATE="
 version: '2.1'
 services:
     $STACK_NAME:
@@ -526,7 +530,7 @@ networks:
         external:
             name: infra_default"
 
-    echo "$DOCKERFILE_TEMPLATE";
+    echo "$COMPOSEFILE_TEMPLATE";
 }
 
 function get_random_name {
@@ -642,20 +646,20 @@ function create_sftp_user_for_container {
 
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
-        SSH_USERNAME=$(echo ${DOMAIN//./} | head -c 16); # Remove . chars from Domain and limit length to 16 characters
-        SSH_PASSWORD=$(get_random_password 20); # 20 characters should be enough
-        print_or_log "Trying to create an SFTP/SSH user with name \"$SSH_USERNAME\" and password \"$SSH_PASSWORD\" on stack $STACK_NAME";
-        local SFTP_USER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&username=$SSH_USERNAME&password=$SSH_PASSWORD&containers[]=$STACK_NAME" --request POST --silent "https://api.sitehost.nz/1.1/cloud/ssh/user/add.json");
+        SFTP_USR=$(echo ${DOMAIN//./} | head -c 16); # Remove . chars from Domain and limit length to 16 characters
+        SFTP_USR_PSWD=$(get_random_password 20); # 20 characters should be enough
+        print_or_log "Trying to create an SFTP/SSH user with name \"$SFTP_USR\" and password \"$SFTP_USR_PSWD\" on stack $STACK_NAME";
+        local SFTP_USER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&username=$SFTP_USR&password=$SFTP_USR_PSWD&containers[]=$STACK_NAME" --request POST --silent "https://api.sitehost.nz/1.1/cloud/ssh/user/add.json");
         local QUERY_STATUS=$(echo $SFTP_USER_QUERY | $JQ --raw-output '.status');
         if [ "$QUERY_STATUS" == "true" ]; then
           local QUERY_JOB_ID=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."return"."job_id"');
           check_job_status $QUERY_JOB_ID;
-          SFTP_USER_CREATED=true;
+          SFTP_CRENTIALS_ON_FILE=true;
           record_sftp_credentials
           copy_website_files
         else
           local QUERY_MSG=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."msg"');
-          error_handler "$LINENO: Cannot create SFTP/SSH user $SSH_USERNAME. Message: $QUERY_MSG"
+          error_handler "$LINENO: Cannot create SFTP/SSH user $SFTP_USR. Message: $QUERY_MSG"
         fi
         ;;
     * )
@@ -674,7 +678,7 @@ function copy_website_files {
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
         print_or_log "Trying to copy files from \"$CPANEL_DOCUMENTROOT\" to the Container's public directory";
-        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SSH_PASSWORD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete ${CPANEL_DOCUMENTROOT}/ ${SSH_USERNAME}@${SERVER_IP}:/container/application/public/ 2>&1)
+        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete ${CPANEL_DOCUMENTROOT}/ ${SFTP_USR}@${SERVER_IP}:/container/application/public/ 2>&1)
         print_or_log "$DEBUG_MSG"
         ;;
     * )
@@ -696,59 +700,161 @@ function get_api_key {
   fi
 }
 
-function record_sftp_credentials () {
+function record_sftp_credentials {
   touch $SFTP_CREDENTIALS_FILE;
   if [ $(wc -l <$SFTP_CREDENTIALS_FILE) -eq "0" ]; then
-    # File is empty, let's put in the "headers"
+    # File is empty, let's put in the "header"
     print_or_log "Recording header in $SFTP_CREDENTIALS_FILE";
-    echo -e "SERVER_IP,SFTP_USERNAME,USER_PASSWORD,DOMAIN" >> $SFTP_CREDENTIALS_FILE;
+    echo -e "DOMAIN,CPANEL_DOCUMENTROOT,SERVER_IP,SFTP_USR,SFTP_USR_PSWD" >> $SFTP_CREDENTIALS_FILE;
   fi
   print_or_log "Recording SFTP details in $SFTP_CREDENTIALS_FILE";
-  echo -e "$SERVER_IP,$SSH_USERNAME,$SSH_PASSWORD,$DOMAIN" >> $SFTP_CREDENTIALS_FILE;
+  echo -e "$DOMAIN,$CPANEL_DOCUMENTROOT,$SERVER_IP,$SFTP_USR,$SFTP_USR_PSWD" >> $SFTP_CREDENTIALS_FILE;
 }
 
-function record_database_user_credentials () {
+function record_database_user_credentials {
   touch $DB_CREDENTIALS_FILE;
   if [ $(wc -l <$DB_CREDENTIALS_FILE) -eq "0" ]; then
-    # File is empty, let's put in the "headers"
+    # File is empty, let's put in the "header"
     print_or_log "Recording header in $DB_CREDENTIALS_FILE";
-    echo -e "CPANEL_DB_USER,CONTAINER_DB_USE,CONTAINER_DB_USER_PW,DOMAIN" >> $DB_CREDENTIALS_FILE;
+    echo -e "DOMAIN,CPANEL_DB,CPANEL_DB_USR,MYSQLHOST,CONTAINER_DB_NAME,CONTAINER_DB_USR,CONTAINER_DB_USR_PSWD" >> $DB_CREDENTIALS_FILE;
   fi
   print_or_log "Recording Database details in $DB_CREDENTIALS_FILE";
-  echo -e "$CPANEL_DATABASE_USER,$CONTAINER_DB_USER,$CONTAINER_DB_USER_PWD,$DOMAIN" >> $DB_CREDENTIALS_FILE;
+  echo -e "$DOMAIN,$CPANEL_DB,$CPANEL_DB_USR,$MYSQLHOST,$CONTAINER_DB_NAME,$CONTAINER_DB_USR,$CONTAINER_DB_USR_PSWD" >> $DB_CREDENTIALS_FILE;
+}
+
+function resync_domain {
+  print_or_log "--- Starting up resync ---"
+  print_or_log "domain: $DOMAIN";
+
+  read_sftp_credentials
+  read_database_user_credentials
+
+  print_or_log "--- Resync done ---"
+}
+
+function read_sftp_credentials  {
+  print_or_log "Reading $SFTP_CREDENTIALS_FILE";
+
+  # On the first line we find the header and our variable names
+  # TODO: What if file is empty?
+  IFS="," read -r -a VARIABLE_NAMES <<< $(head -n 1 $SFTP_CREDENTIALS_FILE)
+  #printf '%s\n' "${VARIABLE_NAMES[@]}"
+
+  # Select the line where related to the domain, we should have only one on file
+  SELECTED_LINE=$(cat $SFTP_CREDENTIALS_FILE | grep $DOMAIN | head -n 1)
+  if [ -n "$SELECTED_LINE" ]; then
+    IFS="," read -r -a VARIABLE_VALUES <<< $SELECTED_LINE
+  else
+    error_handler "$LINENO: Did not find credentials related to $DOMAIN on file. Skipping this domain." "false";
+    return;
+  fi
+
+  # Declare global variables based on the header
+  local VAR_NUMBER=0
+  for VARIABLE in "${VARIABLE_NAMES[@]}"; do
+    CMD_STRING=$(echo "$VARIABLE=\"${VARIABLE_VALUES[$VAR_NUMBER]}\"")
+    print_or_log "Declaring $CMD_STRING";
+    eval "declare -g $CMD_STRING"
+    ((VAR_NUMBER=VAR_NUMBER+1))
+  done
+
+  SFTP_CRENTIALS_ON_FILE=true;
+  copy_website_files
+}
+
+function read_database_user_credentials  {
+  print_or_log "Reading $DB_CREDENTIALS_FILE";
+
+  # On the first line we find the header and our variable names
+  IFS="," read -r -a VARIABLE_NAMES <<< $(head -n 1 $DB_CREDENTIALS_FILE)
+
+  while read -r LINE; do
+    IFS="," read -r -a VARIABLE_VALUES <<< "${LINE}"
+
+    # Declare global variables based on the header
+    local VAR_NUMBER=0
+    for VARIABLE in "${VARIABLE_NAMES[@]}"; do
+      CMD_STRING=$(echo "$VARIABLE=\"${VARIABLE_VALUES[$VAR_NUMBER]}\"")
+      print_or_log "Declaring $CMD_STRING";
+      eval "declare -g $CMD_STRING"
+      ((VAR_NUMBER=VAR_NUMBER+1))
+    done
+
+    # Each line a database
+    print_or_log "Working with database named $CPANEL_DB";
+    CONTAINER_DB_CRENTIALS_ON_FILE=true;
+
+    # We pipe /dev/tty here to avoid function called inherit the same stdin
+    copy_database_dump $CPANEL_DB </dev/tty
+
+  # Select the lines related to the databases related to the domain
+  done < <(grep $DOMAIN $DB_CREDENTIALS_FILE)
+
 }
 
 #################################################### BASE LOGIC ########################################################
 
-get_api_key
-
-pick_destination_server
-
 # Let's get infomation about all domains on the server
 CPANEL_DOMAINS_ARRAY=$($WHMAPI1 get_domain_info --output=json | $JQ --raw-output '.data.domains');
 
-# Do we have a domain?
-if [ -z "$MAIN_DOMAIN" ]; then
+# Is this a resync?
+if [ "$RESYNC" = false ]; then
+  # Not a resync
+  get_api_key
+  pick_destination_server
 
-  # No domain specified, lets move all of them!
-  CPANEL_DOMAINS_COUNT=$(( $(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output 'length') - 1 ));
-  for (( d=0; d<=$CPANEL_DOMAINS_COUNT; d++ )); do
-    CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[$d]");
-    DOMAIN_TYPE=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain_type"');
+  # Did we specify a domain?
+  if [ -z "$DOMAIN_SPECIFIED" ]; then
 
-    # We ignore any "domain_type" : "sub" because they are duplicates of "domain_type" : "addon"
-    # We ignore "domain_type" : "parked" as these are Aliases of another Virtual Host.
-    # We'd still try to migrate a "domain_type" : "parked" if specified via command line
-    if [ $DOMAIN_TYPE == "main" -o $DOMAIN_TYPE == "addon" ]; then
-      migrate_domain "$CPANEL_DOMAIN_INFO";
-    fi
+    # No domain specified, lets move all of them!
+    print_or_log "No domain specified to migrate, considering all hosted domains";
+    CPANEL_DOMAINS_COUNT=$(( $(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output 'length') - 1 ));
+    for (( d=0; d<=$CPANEL_DOMAINS_COUNT; d++ )); do
+      CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[$d]");
+      DOMAIN_TYPE=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain_type"');
 
-  done
+      # We ignore any "domain_type" : "sub" because they are duplicates of "domain_type" : "addon"
+      # We ignore "domain_type" : "parked" as these are Aliases of another Virtual Host.
+      # We'd still try to migrate a "domain_type" : "parked" if specified via command line
+      if [ $DOMAIN_TYPE == "main" -o $DOMAIN_TYPE == "addon" ]; then
+        migrate_domain "$CPANEL_DOMAIN_INFO";
+      fi
+
+    done
+
+  else
+    # Domain specified, move it regardless of type
+    CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[] | select(.domain==\"$DOMAIN_SPECIFIED\")");
+    migrate_domain "$CPANEL_DOMAIN_INFO"
+  fi
+  all_done
 
 else
-  # Domain specified, move it regardless of type
-  CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[] | select(.domain==\"$MAIN_DOMAIN\")");
-  migrate_domain "$CPANEL_DOMAIN_INFO"
-fi
+  # Resync, all infomation required should be available in csv files created previusly
 
-all_done
+  # Did we specify a domain?
+  if [ -z "$DOMAIN_SPECIFIED" ]; then
+
+    # No domain specified, let's try resync all of them!
+    print_or_log "No domain specified to resync, considering all hosted domains";
+    CPANEL_DOMAINS_COUNT=$(( $(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output 'length') - 1 ));
+    for (( d=0; d<=$CPANEL_DOMAINS_COUNT; d++ )); do
+      CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[$d]");
+      DOMAIN_TYPE=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain_type"');
+
+      # We ignore any "domain_type" : "sub". We ignore "domain_type" : "parked".
+      # Same logic as when migrating all domains availables
+      if [ $DOMAIN_TYPE == "main" -o $DOMAIN_TYPE == "addon" ]; then
+        DOMAIN=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain"');
+        resync_domain
+      fi
+
+    done
+
+  else
+    # TODO: What if domain specified does not exist/not hosted?
+    DOMAIN=$DOMAIN_SPECIFIED;
+    resync_domain
+  fi
+
+fi
