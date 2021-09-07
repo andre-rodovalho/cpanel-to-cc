@@ -52,6 +52,7 @@ CONTAINER_CREATED=false
 SFTP_CRENTIALS_ON_FILE=false
 CONTAINER_DB_CRENTIALS_ON_FILE=false
 RESYNC=false
+PURGE=false
 
 ################################################# HELPER FUNCTIONS #####################################################
 
@@ -61,15 +62,20 @@ function help_text {
   echo -e "Examples: "
   echo -e "\t ./cpanel-to-cc.sh --client-id 123123 --api-key abc123def456 --domain example.com"
   echo -e "\t ./cpanel-to-cc.sh --client-id 123123 --tmp-dir /home/user/cpanel-to-cc"
+  echo -e "\t ./cpanel-to-cc.sh --resync --domain example.com"
+  echo -e "\t ./cpanel-to-cc.sh --purge"
   echo;
   echo -e "Arguments: \n"
   echo -e "Option \t\t\t Long option \t\t\t Function"
   echo -e " -c <id> \t\t --client-id <id> \t\t Specify the SiteHost Client ID"
   echo -e " -k <key> \t\t --api-key <key> \t\t Specify the SiteHost API key with access to Cloud, Job and Server modules"
-  echo -e " -d <domain> \t\t --domain <domain> \t\t (Optional) The cPanel domain to migrate. If not specified we try migrate all"
-  echo -e " -t <directory> \t --tmp-dir <directory> \t\t (Optional) Directory to store temporary files and logs. Default is: $TMP_DIR"
-  echo -e " -v \t\t\t --verbose \t\t\t (Optional) Print debugging/verbose information"
-  echo -e " -y \t\t\t --assume-yes \t\t\t (Optional) Automatic yes to prompts. Assume \"yes\" as answer to all prompts"
+  echo -e " -d <domain> \t\t --domain <domain> \t\t The cPanel domain to migrate. If not specified we try migrate all"
+  echo -e " -t <directory> \t --tmp-dir <directory> \t\t Directory to store temporary files and logs. Default is: $TMP_DIR"
+  echo -e " -v \t\t\t --verbose \t\t\t Print debugging/verbose information"
+  echo -e " -y \t\t\t --assume-yes \t\t\t Automatic yes to prompts. Assume \"yes\" as answer to all prompts"
+  echo -e " -r \t\t\t --resync \t\t\t Use credentials stored and copy data into Container already created."
+  echo -e " -p \t\t\t --purge \t\t\t Remove any metadata stored on the the server. This removes any files in: $TMP_DIR"
+  echo -e " -h \t\t\t --help \t\t\t Display this help and exit"
   echo;
 }
 
@@ -184,6 +190,10 @@ while [ "$1" != "" ]; do
       RESYNC=true
     ;;
 
+    "-p" | "--purge" )
+      PURGE=true
+    ;;
+
 	esac
 
   # Next Argument
@@ -211,6 +221,8 @@ function migrate_domain () {
 
   DOMAIN=$(echo $CPANEL_DOMAIN_DATA | $JQ --raw-output '."domain"');
   print_or_log "domain: $DOMAIN";
+
+
 
   CPANEL_USER=$(echo $CPANEL_DOMAIN_DATA | $JQ --raw-output '."user"');
   print_or_log "cpanel user: $CPANEL_USER";
@@ -733,43 +745,27 @@ function resync_domain {
 }
 
 function read_sftp_credentials  {
-  print_or_log "Reading $SFTP_CREDENTIALS_FILE";
+  touch $SFTP_CREDENTIALS_FILE;
 
-  # On the first line we find the header and our variable names
-  # TODO: What if file is empty?
-  IFS="," read -r -a VARIABLE_NAMES <<< $(head -n 1 $SFTP_CREDENTIALS_FILE)
-  #printf '%s\n' "${VARIABLE_NAMES[@]}"
-
-  # Select the line where related to the domain, we should have only one on file
-  SELECTED_LINE=$(cat $SFTP_CREDENTIALS_FILE | grep $DOMAIN | head -n 1)
-  if [ -n "$SELECTED_LINE" ]; then
-    IFS="," read -r -a VARIABLE_VALUES <<< $SELECTED_LINE
-  else
-    error_handler "$LINENO: Did not find credentials related to $DOMAIN on file. Skipping this domain." "false";
+  if [ $(wc -l <$SFTP_CREDENTIALS_FILE) -eq "0" ]; then
+    # File is empty, abort
+    error_handler "$LINENO: Cannot find credentials in the $SFTP_CREDENTIALS_FILE file." "false";
     return;
-  fi
+  else
+    print_or_log "Reading $SFTP_CREDENTIALS_FILE";
 
-  # Declare global variables based on the header
-  local VAR_NUMBER=0
-  for VARIABLE in "${VARIABLE_NAMES[@]}"; do
-    CMD_STRING=$(echo "$VARIABLE=\"${VARIABLE_VALUES[$VAR_NUMBER]}\"")
-    print_or_log "Declaring $CMD_STRING";
-    eval "declare -g $CMD_STRING"
-    ((VAR_NUMBER=VAR_NUMBER+1))
-  done
+    # On the first line we find the header and our variable names
+    IFS="," read -r -a VARIABLE_NAMES <<< $(head -n 1 $SFTP_CREDENTIALS_FILE)
+    #printf '%s\n' "${VARIABLE_NAMES[@]}"
 
-  SFTP_CRENTIALS_ON_FILE=true;
-  copy_website_files
-}
-
-function read_database_user_credentials  {
-  print_or_log "Reading $DB_CREDENTIALS_FILE";
-
-  # On the first line we find the header and our variable names
-  IFS="," read -r -a VARIABLE_NAMES <<< $(head -n 1 $DB_CREDENTIALS_FILE)
-
-  while read -r LINE; do
-    IFS="," read -r -a VARIABLE_VALUES <<< "${LINE}"
+    # Select the line where related to the domain, we should have only one on file
+    SELECTED_LINE=$(cat $SFTP_CREDENTIALS_FILE | grep $DOMAIN | head -n 1)
+    if [ -n "$SELECTED_LINE" ]; then
+      IFS="," read -r -a VARIABLE_VALUES <<< $SELECTED_LINE
+    else
+      error_handler "$LINENO: Did not find credentials related to $DOMAIN on file. Skipping this domain." "false";
+      return;
+    fi
 
     # Declare global variables based on the header
     local VAR_NUMBER=0
@@ -780,16 +776,45 @@ function read_database_user_credentials  {
       ((VAR_NUMBER=VAR_NUMBER+1))
     done
 
-    # Each line a database
-    print_or_log "Working with database named $CPANEL_DB";
-    CONTAINER_DB_CRENTIALS_ON_FILE=true;
+    SFTP_CRENTIALS_ON_FILE=true;
+    copy_website_files
+  fi
+}
 
-    # We pipe /dev/tty here to avoid function called inherit the same stdin
-    copy_database_dump $CPANEL_DB </dev/tty
+function read_database_user_credentials  {
+  touch $DB_CREDENTIALS_FILE;
+  if [ $(wc -l <$DB_CREDENTIALS_FILE) -eq "0" ]; then
+    # File is empty, abort
+    error_handler "$LINENO: Cannot find credentials in the $DB_CREDENTIALS_FILE file." "false";
+    return;
+  else
+    print_or_log "Reading $DB_CREDENTIALS_FILE";
 
-  # Select the lines related to the databases related to the domain
-  done < <(grep $DOMAIN $DB_CREDENTIALS_FILE)
+    # On the first line we find the header and our variable names
+    IFS="," read -r -a VARIABLE_NAMES <<< $(head -n 1 $DB_CREDENTIALS_FILE)
 
+    while read -r LINE; do
+      IFS="," read -r -a VARIABLE_VALUES <<< "${LINE}"
+
+      # Declare global variables based on the header
+      local VAR_NUMBER=0
+      for VARIABLE in "${VARIABLE_NAMES[@]}"; do
+        CMD_STRING=$(echo "$VARIABLE=\"${VARIABLE_VALUES[$VAR_NUMBER]}\"")
+        print_or_log "Declaring $CMD_STRING";
+        eval "declare -g $CMD_STRING"
+        ((VAR_NUMBER=VAR_NUMBER+1))
+      done
+
+      # Each line a database
+      print_or_log "Working with database named $CPANEL_DB";
+      CONTAINER_DB_CRENTIALS_ON_FILE=true;
+
+      # We pipe /dev/tty here to avoid function called inherit the same stdin
+      copy_database_dump $CPANEL_DB </dev/tty
+
+    # Select the lines related to the databases related to the domain
+    done < <(grep $DOMAIN $DB_CREDENTIALS_FILE)
+  fi
 }
 
 #################################################### BASE LOGIC ########################################################
@@ -797,9 +822,53 @@ function read_database_user_credentials  {
 # Let's get infomation about all domains on the server
 CPANEL_DOMAINS_ARRAY=$($WHMAPI1 get_domain_info --output=json | $JQ --raw-output '.data.domains');
 
-# Is this a resync?
-if [ "$RESYNC" = false ]; then
-  # Not a resync
+# Check actions
+if [ "$RESYNC" = true ]; then
+
+  # Resync, all infomation required should be available in csv files created previusly
+  # Did we specify a domain?
+  if [ -z "$DOMAIN_SPECIFIED" ]; then
+
+    # No domain specified, let's try resync all of them!
+    print_or_log "No domain specified to resync, considering all hosted domains";
+    CPANEL_DOMAINS_COUNT=$(( $(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output 'length') - 1 ));
+    for (( d=0; d<=$CPANEL_DOMAINS_COUNT; d++ )); do
+      CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[$d]");
+      DOMAIN_TYPE=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain_type"');
+
+      # We ignore any "domain_type" : "sub". We ignore "domain_type" : "parked".
+      # Same logic as when migrating all domains available
+      if [ $DOMAIN_TYPE == "main" -o $DOMAIN_TYPE == "addon" ]; then
+        DOMAIN=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain"');
+        resync_domain
+      fi
+
+    done
+
+  else
+    DOMAIN=$DOMAIN_SPECIFIED;
+    resync_domain
+  fi
+
+elif [ "$PURGE" = true ]; then
+  print_or_log "Let's cleanup?"
+
+  # To be safe, we won't consider YES_TO_ALL and always ask for a confirmation
+  read -p "Are you sure we are safe to remove \"$TMP_DIR\" and everything in it? [y/N]: " RESPONSE;
+  case "$RESPONSE" in
+    [yY][eE][sS]|[yY] )
+        print_or_log "Removing \"$TMP_DIR\""
+        sleep 0.5;
+        rm -rf $TMP_DIR
+        ;;
+    * )
+        print_or_log "Ok, won't remove anything"
+        ;;
+  esac
+
+else
+
+  # Migration
   get_api_key
   pick_destination_server
 
@@ -825,36 +894,15 @@ if [ "$RESYNC" = false ]; then
   else
     # Domain specified, move it regardless of type
     CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[] | select(.domain==\"$DOMAIN_SPECIFIED\")");
-    migrate_domain "$CPANEL_DOMAIN_INFO"
+
+    # Validate the domain is hosted on the server. This would avoid a typo producing unexpected behaviour.
+    if [ -n "$CPANEL_DOMAIN_INFO" ]; then
+      migrate_domain "$CPANEL_DOMAIN_INFO"
+    else
+      error_handler "$LINENO: Cannot find a \"$DOMAIN_SPECIFIED\" hosted on this server. Ignoring this domain." "false";
+    fi
+
   fi
   all_done
-
-else
-  # Resync, all infomation required should be available in csv files created previusly
-
-  # Did we specify a domain?
-  if [ -z "$DOMAIN_SPECIFIED" ]; then
-
-    # No domain specified, let's try resync all of them!
-    print_or_log "No domain specified to resync, considering all hosted domains";
-    CPANEL_DOMAINS_COUNT=$(( $(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output 'length') - 1 ));
-    for (( d=0; d<=$CPANEL_DOMAINS_COUNT; d++ )); do
-      CPANEL_DOMAIN_INFO=$(echo $CPANEL_DOMAINS_ARRAY | $JQ --raw-output ".[$d]");
-      DOMAIN_TYPE=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain_type"');
-
-      # We ignore any "domain_type" : "sub". We ignore "domain_type" : "parked".
-      # Same logic as when migrating all domains availables
-      if [ $DOMAIN_TYPE == "main" -o $DOMAIN_TYPE == "addon" ]; then
-        DOMAIN=$(echo $CPANEL_DOMAIN_INFO | $JQ --raw-output '."domain"');
-        resync_domain
-      fi
-
-    done
-
-  else
-    # TODO: What if domain specified does not exist/not hosted?
-    DOMAIN=$DOMAIN_SPECIFIED;
-    resync_domain
-  fi
 
 fi
