@@ -246,16 +246,29 @@ function migrate_domain () {
 }
 
 function set_php_version {
-  if [ -z "$CPANEL_PHP_VERSION" ]; then
+  local VERSION=$CPANEL_PHP_VERSION
+
+  if [ -z "$VERSION" ]; then
     # php_version is blank, this happens when the cPanel account or domain is set with the "Inherit" option
     # Get php_version default on the system
-    local PHP_DEFAULT_VERSION=$($WHMAPI1 --output=json php_get_system_default_version | $JQ --raw-output '."data"."version"');
-    PHP_VERSION="${PHP_DEFAULT_VERSION//[!1-9]/}" # Note: we do not want 0s here. SiteHost convention
-    print_or_log "cPanel php_version is blank, (Inherit selected?). System default set: $PHP_VERSION";
-  else
-    PHP_VERSION="${CPANEL_PHP_VERSION//[!1-9]/}" # Note: we do not want 0s here. SiteHost convention
-    print_or_log "php_version for $DOMAIN: $PHP_VERSION";
+    local VERSION=$($WHMAPI1 --output=json php_get_system_default_version | $JQ --raw-output '."data"."version"');
+    print_or_log "cPanel php_version is blank, (Inherit selected?). System default set: $VERSION";
   fi
+
+  # In order to reduce the compatibility list size we remove anything that is not number
+  # Majority of cases this is already the information we need
+  local VERSION_NUMBER="${VERSION//[!1-9]/}" # Note: we do not want 0s here
+
+  # This is our cPanel PHP version compatibility/exception list
+  case "$VERSION_NUMBER" in
+    "5" )
+        PHP_VERSION="56"
+        ;;
+    * )
+        PHP_VERSION=$VERSION_NUMBER;
+        ;;
+  esac
+  print_or_log "php_version selected for $DOMAIN: $PHP_VERSION";
 }
 
 function create_container_for_domain {
