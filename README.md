@@ -8,9 +8,9 @@ This bash script leverages the [SiteHost API](https://docs.sitehost.nz/api/v1.1/
 
 # Known issues, limitations and requirements
 
-- The tool has been designed to run on the cPanel® (Source) server
-- Root SSH access to the Source hosting server is required
-- Designed to migrate PHP based applications only
+- The tool has been designed to run on a cPanel® server as a Source server
+- Root SSH access to the Source server is required
+- The tool has been designed to migrate PHP + MySQL applications only
 - MySQL secrets cannot be retrieved from the Source server so you must reconfigure your website database credentials to get it working on the Destination
 - There's no metadata to correlate databases and domains on the Source server but you can interact with the tool to selectively copy data over
 - SiteHost API key with access to Cloud, Job and Server modules is required. SiteHost support can provide you with one
@@ -20,6 +20,13 @@ You may need to install a few extra packages on the Source server:
 ```
 yum install jq oniguruma rsync curl sshpass
 ```
+
+# Supported versions
+
+We expect the tool to work on any cPanel server running CentOS 6 or newer. We have also tested it on CloudLinux servers. The oldest WHM version tested was v76.0.22.
+
+The tool won't work on bash older than v4.
+ 
 
 # Usage
 
@@ -34,9 +41,12 @@ chmod u+x cpanel-to-cc.sh
 bash cpanel-to-cc.sh --help
 ```
 
-Check the `help` instructions to learn about all valid arguments, options and examples.
+The `help` instructions has a list of all valid arguments, options and also usage examples.
 
-Execution example:
+If you did not connect to the Destination server from the Source server yet, try connecting before copying data over to ensure the Destination is added to the list of known hosts.
+
+
+Expected output:
 ```
 [root@cloudlinux ~]# ./cpanel-to-cc.sh --client-id 123654 --domain example.co --assume-yes
 => Run log available at: /tmp/cpanel-to-cc/run.log
@@ -58,6 +68,7 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 **cPanel® is a trademark of cPanel, Inc.**
+
 **SiteHost Limited is a legal entity name owned by SiteTech Solutions Limited**
 
 All trademarks, logos and brand names are the property of their respective owners. All company, product and service names used in this software are for identification purposes only. Use of these names, trademarks and brands does not imply endorsement.
