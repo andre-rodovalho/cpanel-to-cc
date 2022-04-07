@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # cPanel to SiteHost Containers Migration Tool - https://gitlab.com/andre.rodovalho/cpanel-to-cc
 # Copyright (C) 2021-present Andre Campos Rodovalho.
@@ -281,7 +281,9 @@ function create_container_for_domain {
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
         print_or_log "Yes, creating Container on $SERVER_NAME with IP $SERVER_IP";
-        local CREATE_CONTAINER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server=$SERVER_NAME&name=$STACK_NAME&label=$DOMAIN&enable_ssl=0&docker_compose=$COMPOSEFILE" --request POST --silent "https://api.sitehost.nz/1.1/cloud/stack/add.json");
+        local CREATE_CONTAINER_QUERY=$($CURL --data \
+          "apikey=$API_KEY&client_id=$CLIENT_ID&server=$SERVER_NAME&name=$STACK_NAME&label=$DOMAIN&enable_ssl=0&docker_compose=$COMPOSEFILE" \
+          --request POST --silent "https://api.sitehost.nz/1.1/cloud/stack/add.json");
         local QUERY_STATUS=$(echo $CREATE_CONTAINER_QUERY | $JQ --raw-output '.status');
         if [ "$QUERY_STATUS" == "true" ]; then
           #echo "Creation results $CREATE_CONTAINER_QUERY";
@@ -353,7 +355,9 @@ function create_databases {
       [yY][eE][sS]|[yY] )
           set_mysqlhost
           CONTAINER_DB_NAME=${CPANEL_DB//_/}; # Underscore on DB name not supported
-          local DB_CREATE_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&mysql_host=$MYSQLHOST&database=$CONTAINER_DB_NAME&container=$STACK_NAME" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/add.json");
+          local DB_CREATE_QUERY=$($CURL --data \
+            "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&mysql_host=$MYSQLHOST&database=$CONTAINER_DB_NAME&container=$STACK_NAME" \
+            --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/add.json");
           local QUERY_STATUS=$(echo $DB_CREATE_QUERY | $JQ --raw-output '.status');
           if [ "$QUERY_STATUS" == "true" ]; then
             local QUERY_JOB_ID=$(echo $DB_CREATE_QUERY | $JQ --raw-output '."return"."job_id"');
@@ -417,7 +421,10 @@ function create_database_users {
           CONTAINER_DB_USR=$(echo ${CPANEL_DB_USR//_/} | head -c 16); # Underscore on DB users not supported, max length is 16
           CONTAINER_DB_USR_PSWD=$(get_random_password); # Max length is 16
           get_database_user_grants $CPANEL_DB $CPANEL_DB_USR
-          local DB_USER_QUERY=$($CURL --data "apikey=${API_KEY}&client_id=${CLIENT_ID}&server_name=${SERVER_NAME}&mysql_host=${MYSQLHOST}&username=${CONTAINER_DB_USR}&password=${CONTAINER_DB_USR_PSWD}&database=${CONTAINER_DB_NAME}${GRANT_STRING}" --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
+          local DB_USER_QUERY=$($CURL --data \
+            "apikey=${API_KEY}&client_id=${CLIENT_ID}&server_name=${SERVER_NAME}&mysql_host=${MYSQLHOST}&\
+            username=${CONTAINER_DB_USR}&password=${CONTAINER_DB_USR_PSWD}&database=${CONTAINER_DB_NAME}${GRANT_STRING}" \
+            --request POST --silent "https://api.sitehost.nz/1.1/cloud/db/user/add.json");
           local QUERY_STATUS=$(echo $DB_USER_QUERY | $JQ --raw-output '.status');
           if [ "$QUERY_STATUS" == "true" ]; then
             local QUERY_JOB_ID=$(echo $DB_USER_QUERY | $JQ --raw-output '."return"."job_id"');
@@ -448,7 +455,9 @@ function get_database_user_grants {
     local PRIVILEGE=$(echo $PRIVILEGES_LIST | jq --raw-output ".[$i]");
       case "$PRIVILEGE" in
         "ALL PRIVILEGES" )
-            GRANT_STRING="&grants[]=select&grants[]=insert&grants[]=update&grants[]=delete&grants[]=create&grants[]=drop&grants[]=alter&grants[]=index&grants[]=create view&grants[]=show view&grants[]=lock tables&grants[]=create temporary tables"
+            GRANT_STRING="&grants[]=select&grants[]=insert&grants[]=update&grants[]=delete&grants[]=create&\
+            grants[]=drop&grants[]=alter&grants[]=index&grants[]=create view&grants[]=show view&\
+            grants[]=lock tables&grants[]=create temporary tables"
             ;;
         * )
             local PRIVILEGE_LOWERCASE=$(echo $PRIVILEGE | tr '[:upper:]' '[:lower:]');
@@ -481,7 +490,8 @@ function copy_database_dump {
         print_or_log "Trying to create dump at \"$DATABASE_DUMP_PATH\"";
         $MYSQLDUMP $CPANEL_DB | $GZIP > $DATABASE_DUMP_PATH;
         print_or_log "Trying to copy dump to the Container's application directory";
-        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete $DATABASE_DUMP_PATH ${SFTP_USR}@${SERVER_IP}:/container/application/ 2>&1)
+        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no" \
+          --archive --stats --delete $DATABASE_DUMP_PATH ${SFTP_USR}@${SERVER_IP}:/container/application/ 2>&1)
         print_or_log "$DEBUG_MSG"
         print_or_log "Removing dump at \"$DATABASE_DUMP_PATH\"";
         rm --force $DATABASE_DUMP_PATH;
@@ -511,7 +521,9 @@ function restore_database_from_dump () {
 
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
-        local DEBUG_MSG=$($SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no ${SFTP_USR}@${SERVER_IP} "gunzip < /container/application/$DATABASE_DUMP_FILENAME | mysql --host=$MYSQLHOST --user=${CONTAINER_DB_USR} --password=${CONTAINER_DB_USR_PSWD} $CONTAINER_DB_NAME" 2>&1)
+        local DEBUG_MSG=$($SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no ${SFTP_USR}@${SERVER_IP} \
+          "gunzip < /container/application/$DATABASE_DUMP_FILENAME | mysql --host=$MYSQLHOST --user=${CONTAINER_DB_USR} \
+          --password=${CONTAINER_DB_USR_PSWD} $CONTAINER_DB_NAME" 2>&1)
         print_or_log "$DEBUG_MSG"
         ;;
     * )
@@ -610,7 +622,8 @@ function check_job_status () {
 }
 
 function pick_destination_server {
-  local SERVERS_QUERY=$($CURL --silent "https://api.sitehost.nz/1.1/server/list_servers.json?apikey=$API_KEY&client_id=$CLIENT_ID&filters%5Bproduct_type%5D=CLDCON");
+  local SERVERS_QUERY=$($CURL --silent \
+    "https://api.sitehost.nz/1.1/server/list_servers.json?apikey=$API_KEY&client_id=$CLIENT_ID&filters%5Bproduct_type%5D=CLDCON");
   local QUERY_STATUS=$(echo $SERVERS_QUERY | $JQ --raw-output '.status');
   if [ "$QUERY_STATUS" == "true" ]; then
     local SERVERS_COUNT=$(( $(echo $SERVERS_QUERY | $JQ --raw-output '.return."total_items"') - 1));
@@ -674,7 +687,9 @@ function create_sftp_user_for_container {
         SFTP_USR=$(echo ${DOMAIN//./} | head -c 16); # Remove . chars from Domain and limit length to 16 characters
         SFTP_USR_PSWD=$(get_random_password 20); # 20 characters should be enough
         print_or_log "Trying to create an SFTP/SSH user with name \"$SFTP_USR\" and password \"$SFTP_USR_PSWD\" on stack $STACK_NAME";
-        local SFTP_USER_QUERY=$($CURL --data "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&username=$SFTP_USR&password=$SFTP_USR_PSWD&containers[]=$STACK_NAME" --request POST --silent "https://api.sitehost.nz/1.1/cloud/ssh/user/add.json");
+        local SFTP_USER_QUERY=$($CURL --data \
+          "apikey=$API_KEY&client_id=$CLIENT_ID&server_name=$SERVER_NAME&username=$SFTP_USR&password=$SFTP_USR_PSWD&containers[]=$STACK_NAME" \
+          --request POST --silent "https://api.sitehost.nz/1.1/cloud/ssh/user/add.json");
         local QUERY_STATUS=$(echo $SFTP_USER_QUERY | $JQ --raw-output '.status');
         if [ "$QUERY_STATUS" == "true" ]; then
           local QUERY_JOB_ID=$(echo $SFTP_USER_QUERY | $JQ --raw-output '."return"."job_id"');
@@ -703,7 +718,8 @@ function copy_website_files {
   case "$RESPONSE" in
     [yY][eE][sS]|[yY] )
         print_or_log "Trying to copy files from \"$CPANEL_DOCUMENTROOT\" to the Container's public directory";
-        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no" --archive --stats --delete ${CPANEL_DOCUMENTROOT}/ ${SFTP_USR}@${SERVER_IP}:/container/application/public/ 2>&1)
+        local DEBUG_MSG=$($RSYNC --rsh="$SSHPASS -p $SFTP_USR_PSWD $SSH -o StrictHostKeyChecking=no" --archive --stats \
+          --delete ${CPANEL_DOCUMENTROOT}/ ${SFTP_USR}@${SERVER_IP}:/container/application/public/ 2>&1)
         print_or_log "$DEBUG_MSG"
         ;;
     * )
