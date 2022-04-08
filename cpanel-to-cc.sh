@@ -32,16 +32,18 @@ set -e;
 
 ################################################### DECLARATIONS #######################################################
 
-JQ="/usr/bin/jq"
-WHMAPI1="/usr/sbin/whmapi1"
-UAPI="/usr/local/cpanel/bin/uapi"
-RSYNC="/usr/bin/rsync"
-CURL="/usr/bin/curl"
-MYSQLDUMP="/usr/bin/mysqldump"
-MYSQL="/usr/bin/mysql"
-SSHPASS="/usr/bin/sshpass"
-SSH="/usr/bin/ssh"
-GZIP="/usr/bin/gzip"
+readonly JQ="/usr/bin/jq"
+readonly WHMAPI1="/usr/sbin/whmapi1"
+readonly UAPI="/usr/local/cpanel/bin/uapi"
+readonly RSYNC="/usr/bin/rsync"
+readonly CURL="/usr/bin/curl"
+readonly MYSQLDUMP="/usr/bin/mysqldump"
+readonly MYSQL="/usr/bin/mysql"
+readonly SSHPASS="/usr/bin/sshpass"
+readonly SSH="/usr/bin/ssh"
+readonly GZIP="/usr/bin/gzip"
+readonly DEBUG_INK="\033[0;31m"
+readonly DEFAULT_INK="\033[0m"
 TMP_DIR="/tmp/cpanel-to-cc"
 LOG_FILE="${TMP_DIR}/run.log"
 SFTP_CREDENTIALS_FILE="${TMP_DIR}/sftp.csv"
@@ -118,9 +120,9 @@ function get_random_password () {
 function print_or_log () {
   local LINE=$1
   if [ "$VERBOSE" = true ]; then
-    echo "+ $LINE";
+    printf "${DEBUG_INK}${LINE}${DEFAULT_INK}\n";
   else
-    echo "[$(timestamp)] $LINE" >> $LOG_FILE
+    printf "[$(timestamp)] $LINE\n" >> $LOG_FILE
   fi
 }
 
@@ -261,6 +263,10 @@ function set_php_version {
 
   # This is our cPanel PHP version compatibility/exception list
   case "$VERSION_NUMBER" in
+    "" )
+        # PHP version was not detected - cannot proceed
+        error_handler "$LINENO: PHP not found. Is it installed?";
+        ;;
     "5" )
         PHP_VERSION="56"
         ;;
