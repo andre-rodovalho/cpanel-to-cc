@@ -42,7 +42,8 @@ readonly MYSQL="/usr/bin/mysql"
 readonly SSHPASS="/usr/bin/sshpass"
 readonly SSH="/usr/bin/ssh"
 readonly GZIP="/usr/bin/gzip"
-readonly DEBUG_INK="\033[0;31m"
+readonly DEBUG_INK="\033[0;35m"
+readonly ERROR_INK="\033[0;31m"
 readonly DEFAULT_INK="\033[0m"
 TMP_DIR="/tmp/cpanel-to-cc"
 LOG_FILE="${TMP_DIR}/run.log"
@@ -84,9 +85,9 @@ function help_text {
 function error_handler {
   MSG=${1:-"Unknown Error"}
   EXIT=${2:-true}
-  echo "$(basename $0): $MSG" 1>&2
+  printf "${ERROR_INK}$(basename $0): $MSG${DEFAULT_INK}\n" 1>&2
   # We want to print but also log this event
-  echo "[$(timestamp)] $(basename $0): $MSG" >> $LOG_FILE
+  printf "[$(timestamp)] $(basename $0): $MSG\n" >> $LOG_FILE
   # If it's not a critical error we can continue safely
   if [ "$EXIT" = true ]; then
     exit 1
