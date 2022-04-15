@@ -61,26 +61,26 @@ PURGE=false
 ################################################# HELPER FUNCTIONS #####################################################
 
 function help_text {
-  printf "\n"
-  printf "Usage: ./cpanel-to-cc.sh [arguments] ... \n"
-  printf "Examples: \n"
-  printf "\t ./cpanel-to-cc.sh --client-id 123123 --api-key abc123def456 --domain example.com \n"
-  printf "\t ./cpanel-to-cc.sh --client-id 123123 --tmp-dir /home/user/cpanel-to-cc \n"
-  printf "\t ./cpanel-to-cc.sh --resync --domain example.com \n"
-  printf "\t ./cpanel-to-cc.sh --purge \n"
-  printf "\n"
-  printf "Arguments: \n"
-  printf "Option \t\t\t Long option \t\t\t Function \n"
-  printf " -c <id> \t\t --client-id <id> \t\t Specify the SiteHost Client ID \n"
-  printf " -k <key> \t\t --api-key <key> \t\t Specify the SiteHost API key with access to Cloud, Job and Server modules \n"
-  printf " -d <domain> \t\t --domain <domain> \t\t The cPanel domain to migrate. If not specified we try migrate all \n"
-  printf " -t <directory> \t --tmp-dir <directory> \t\t Directory to store temporary files and logs. Default is: $TMP_DIR \n"
-  printf " -v \t\t\t --verbose \t\t\t Print debugging/verbose information \n"
-  printf " -y \t\t\t --assume-yes \t\t\t Automatic yes to prompts. Assume \"yes\" as answer to all prompts \n"
-  printf " -r \t\t\t --resync \t\t\t Use credentials stored and copy data into Container already created. \n"
-  printf " -p \t\t\t --purge \t\t\t Remove any metadata stored on the the server. This removes any files in: $TMP_DIR \n"
-  printf " -h \t\t\t --help \t\t\t Display this help and exit \n"
-  printf "\n"
+  printf "\n\
+Usage: ./cpanel-to-cc.sh [arguments] ... \n\
+Examples: \n\
+\t ./cpanel-to-cc.sh --client-id 123123 --api-key abc123def456 --domain example.com \n\
+\t ./cpanel-to-cc.sh --client-id 123123 --tmp-dir /home/user/cpanel-to-cc \n\
+\t ./cpanel-to-cc.sh --resync --domain example.com \n\
+\t ./cpanel-to-cc.sh --purge \n\
+\n\
+Arguments: \n\
+Option \t\t\t Long option \t\t\t Function \n\
+ -c <id> \t\t --client-id <id> \t\t Specify the SiteHost Client ID \n\
+ -k <key> \t\t --api-key <key> \t\t Specify the SiteHost API key with access to Cloud, Job and Server modules \n\
+ -d <domain> \t\t --domain <domain> \t\t The cPanel domain to migrate. If not specified we try migrate all \n\
+ -t <directory> \t --tmp-dir <directory> \t\t Directory to store temporary files and logs. Default is: $TMP_DIR \n\
+ -v \t\t\t --verbose \t\t\t Print debugging/verbose information \n\
+ -y \t\t\t --assume-yes \t\t\t Automatic yes to prompts. Assume \"yes\" as answer to all prompts \n\
+ -r \t\t\t --resync \t\t\t Use credentials stored and copy data into Container already created. \n\
+ -p \t\t\t --purge \t\t\t Remove any metadata stored on the the server. This removes any files in: $TMP_DIR \n\
+ -h \t\t\t --help \t\t\t Display this help and exit \n\
+ \n"
 }
 
 function error_handler {
